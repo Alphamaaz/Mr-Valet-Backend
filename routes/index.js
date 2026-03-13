@@ -5,6 +5,8 @@ import ticketRoutes from "./ticket.routes.js";
 import userRoutes from "./user.routes.js";
 import branchRoutes from "./branch.routes.js";
 import attendanceRoutes from "./attendance.routes.js";
+import chatRoutes from "./chat.routes.js";
+import employeeRoutes from "./employee.routes.js";
 
 const router = Router();
 
@@ -14,5 +16,7 @@ router.use("/v1/tickets", ticketRoutes);
 router.use("/v1/users", userRoutes);
 router.use("/v1/branches", branchRoutes);
 router.use("/v1/attendance", attendanceRoutes);
+router.use("/v1/chat", chatRoutes);
+router.use("/v1/employees", employeeRoutes);
 
 export default router;

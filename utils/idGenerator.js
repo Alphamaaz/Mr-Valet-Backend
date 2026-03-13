@@ -16,3 +16,10 @@ export function generateValetCode(locationCode = "LSA") {
   return `${locationCode}-${randomDigits(3)}`;
 }
 
+export async function generateEmployeeId() {
+  const { EmployeeProfile } = await import("../models/EmployeeProfile.js");
+  const count = await EmployeeProfile.countDocuments();
+  const num = count + 1;
+  return `EMP${String(num).padStart(3, "0")}`;
+}
+
