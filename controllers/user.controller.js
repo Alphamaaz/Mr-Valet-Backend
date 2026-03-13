@@ -1,10 +1,14 @@
 import { z } from "zod";
 import mongoose from "mongoose";
-import { conflict, badRequest, forbidden } from "../errors/AppError.js";
+import fs from "fs";
+import path from "path";
+import { conflict, badRequest, forbidden, notFound } from "../errors/AppError.js";
 import { User } from "../models/User.js";
 import { STAFF_ROLES } from "../constants/roles.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { Branch } from "../models/Branch.js";
+import { ChatGroup } from "../models/ChatGroup.js";
+import { Message } from "../models/Message.js";
 
 const createPlatformUserSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
@@ -167,4 +171,63 @@ export async function updatePlatformUser(req, res) {
   );
 }
 
+// ─── Update Profile Image ─────────────────────────────────────────────
+
+export async function updateProfileImage(req, res) {
+  const userId = req.user.id;
+
+  if (!req.file) {
+    throw badRequest("Image file is required");
+  }
+
+  const user = await User.findById(userId);
+  if (!user) throw notFound("User not found");
+
+  // Delete old image if exists
+  if (user.profileImage) {
+    const oldPath = path.join(process.cwd(), user.profileImage);
+    fs.unlink(oldPath, () => {});
+  }
+
+  const imageUrl = `/public/profiles/${req.file.filename}`;
+  user.profileImage = imageUrl;
+  await user.save();
+
+  res.status(200).json(
+    new ApiResponse(200, { profileImage: imageUrl }, "Profile image updated successfully"),
+  );
+}
+
+// ─── Delete Account ───────────────────────────────────────────────────
+
+export async function deleteAccount(req, res) {
+  const userId = req.user.id;
+
+  const user = await User.findById(userId);
+  if (!user) throw notFound("User not found");
+
+  // Delete profile image from disk if exists
+  if (user.profileImage) {
+    const imgPath = path.join(process.cwd(), user.profileImage);
+    fs.unlink(imgPath, () => {});
+  }
+
+  // Remove user from all chat groups
+  await ChatGroup.updateMany(
+    { members: userId },
+    {
+      $pull: { members: userId },
+      $unset: { [`unreadCounts.${userId}`]: "" },
+    },
+  );
+
+  // Soft delete: deactivate the account
+  user.isActive = false;
+  user.phone = `deleted_${userId}_${user.phone}`;
+  await user.save();
+
+  res.status(200).json(
+    new ApiResponse(200, null, "Account deleted successfully"),
+  );
+}
 

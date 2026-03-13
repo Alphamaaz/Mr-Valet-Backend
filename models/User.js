@@ -37,6 +37,10 @@ const userSchema = new mongoose.Schema(
       enum: ["CHECKED_IN", "CHECKED_OUT", "ON_BREAK"],
       default: "CHECKED_OUT",
     },
+    profileImage: {
+      type: String,
+      default: "",
+    },
     isActive: {
       type: Boolean,
       default: true,
