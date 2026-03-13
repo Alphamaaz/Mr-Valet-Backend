@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
 
 const branchSchema = new mongoose.Schema(
   {
@@ -38,6 +39,11 @@ const branchSchema = new mongoose.Schema(
       min: 10,
       max: 1000,
     },
+    supportedEntryMethods: {
+      type: [String],
+      enum: ENTRY_METHOD_VALUES,
+      default: () => [...ENTRY_METHOD_VALUES],
+    },
     isActive: {
       type: Boolean,
       default: true,
@@ -51,4 +57,3 @@ const branchSchema = new mongoose.Schema(
 );
 
 export const Branch = mongoose.model("Branch", branchSchema);
-

@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema(
       ref: "Branch",
       required() {
         // TODO: For testing - branch is optional regardless of role
-        return false;
+        return true;
         // return STAFF_ROLES.includes(this.role);
       },
       default: null,
@@ -34,7 +34,7 @@ const userSchema = new mongoose.Schema(
     },
     attendanceStatus: {
       type: String,
-      enum: ["CHECKED_IN", "CHECKED_OUT"],
+      enum: ["CHECKED_IN", "CHECKED_OUT", "ON_BREAK"],
       default: "CHECKED_OUT",
     },
     isActive: {

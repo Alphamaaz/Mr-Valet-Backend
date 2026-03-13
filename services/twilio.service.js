@@ -44,3 +44,21 @@ export async function sendOtpSms({ phone, otpCode }) {
   });
 }
 
+export async function sendTextSms({ phone, body }) {
+  const from = process.env.TWILIO_PHONE_NUMBER;
+  if (!from) {
+    throw new Error("TWILIO_PHONE_NUMBER is missing");
+  }
+  if (!body || !String(body).trim()) {
+    throw new Error("SMS body is missing");
+  }
+
+  const client = getTwilioClient();
+  const to = toE164(phone);
+
+  await client.messages.create({
+    body: String(body).trim(),
+    to,
+    from,
+  });
+}

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import {
   assignDriver,
-  createTicket,
+  createManualCarArrival,
   getTicketById,
   listTickets,
   updateTicketStatus,
@@ -21,10 +21,6 @@ router.get(
     ROLES.DRIVER,
     ROLES.KEY_CONTROLLER,
     ROLES.SUPERVISOR,
-    ROLES.AREA_SUPERVISOR,
-    ROLES.AOM,
-    ROLES.OM,
-    ROLES.HEAD_OF_OPERATIONS,
   ),
   asyncHandler(listTickets),
 );
@@ -36,18 +32,14 @@ router.get(
     ROLES.DRIVER,
     ROLES.KEY_CONTROLLER,
     ROLES.SUPERVISOR,
-    ROLES.AREA_SUPERVISOR,
-    ROLES.AOM,
-    ROLES.OM,
-    ROLES.HEAD_OF_OPERATIONS,
   ),
   asyncHandler(getTicketById),
 );
 
 router.post(
-  "/",
+  "/manual/car-arrival",
   requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR),
-  asyncHandler(createTicket),
+  asyncHandler(createManualCarArrival),
 );
 
 router.patch(
@@ -68,4 +60,3 @@ router.patch(
 );
 
 export default router;
-

@@ -10,7 +10,7 @@ const createPlatformUserSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
   phone: z.string().trim().min(8).max(20),
   role: z.enum(STAFF_ROLES),
-  branchId: z.string().optional(),
+  branchId: z.string(),
   isActive: z.boolean().optional(),
 });
 
@@ -52,7 +52,7 @@ export async function createPlatformUser(req, res) {
 
   // Use branchId from request body if provided, otherwise use authenticated user's branchId
   const branchId = payload.branchId || req.user?.branchId;
-  
+
   let branch = null;
   if (branchId && isValidObjectId(branchId)) {
     branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
@@ -82,13 +82,13 @@ export async function createPlatformUser(req, res) {
 }
 
 export async function getPlatformUsers(req, res) {
-  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
-    throw forbidden("You are not assigned to a valid branch");
-  }
+  // if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+  //   throw forbidden("You are not assigned to a valid branch");
+  // }
 
   const users = await User.find({
     role: { $in: STAFF_ROLES },
-    branch: req.user.branchId,
+    // branch: req.user.branchId,
   })
     .populate("branch", "name")
     .lean();
@@ -105,7 +105,7 @@ export async function getPlatformUserById(req, res) {
 
   const user = await User.findOne({
     _id: userId,
-    branch: req.user.branchId,
+    // branch: req.user.branchId,
   })
     .populate("branch", "name")
     .lean();
@@ -165,6 +165,6 @@ export async function updatePlatformUser(req, res) {
   return res.json(
     new ApiResponse(200, toUserResponse(user), "Platform user updated successfully"),
   );
-} 
+}
 
 

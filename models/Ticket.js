@@ -26,6 +26,7 @@ const ticketSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
+      index: true,
     },
     ownerUser: {
       type: mongoose.Schema.Types.ObjectId,

@@ -24,9 +24,9 @@ const vehicleSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
-    photos: {
-      type: [String],
-      default: [],
+    photo: {
+      type: String,
+      default: null,
     },
   },
   {

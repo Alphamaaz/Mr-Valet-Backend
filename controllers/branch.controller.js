@@ -4,6 +4,7 @@ import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js
 import { Branch } from "../models/Branch.js";
 import { User } from "../models/User.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import { ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
 
 const createBranchSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -12,9 +13,14 @@ const createBranchSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   allowedRadiusMeters: z.number().min(10).max(1000).optional(),
+  supportedEntryMethods: z.array(z.enum(ENTRY_METHOD_VALUES)).min(1).optional(),
 });
 
 function toBranchResponse(branch) {
+  const supportedEntryMethods = Array.isArray(branch.supportedEntryMethods) && branch.supportedEntryMethods.length
+    ? branch.supportedEntryMethods
+    : [...ENTRY_METHOD_VALUES];
+
   return {
     id: String(branch._id),
     name: branch.name,
@@ -23,6 +29,7 @@ function toBranchResponse(branch) {
     latitude: branch.latitude,
     longitude: branch.longitude,
     allowedRadiusMeters: branch.allowedRadiusMeters,
+    supportedEntryMethods,
     isActive: branch.isActive,
     createdAt: branch.createdAt,
   };
@@ -58,6 +65,7 @@ export async function createBranch(req, res) {
     latitude: payload.latitude,
     longitude: payload.longitude,
     allowedRadiusMeters: payload.allowedRadiusMeters ?? 120,
+    supportedEntryMethods: payload.supportedEntryMethods || [...ENTRY_METHOD_VALUES],
   });
 
   // Bootstrap flow: creator without a branch becomes part of this new branch.
@@ -132,6 +140,7 @@ export async function updateBranch(req, res) {
   if (payload.latitude !== undefined) branch.latitude = payload.latitude;
   if (payload.longitude !== undefined) branch.longitude = payload.longitude;
   if (payload.allowedRadiusMeters !== undefined) branch.allowedRadiusMeters = payload.allowedRadiusMeters;
+  if (payload.supportedEntryMethods !== undefined) branch.supportedEntryMethods = payload.supportedEntryMethods;
 
   await branch.save();
 

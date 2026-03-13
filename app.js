@@ -10,6 +10,11 @@ import { errorHandler } from "./middleware/errorHandler.js";
 
 export function createApp() {
   const app = express();
+  const rawBodySaver = (req, _res, buf) => {
+    if (buf?.length) {
+      req.rawBody = buf.toString("utf8");
+    }
+  };
   const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.API_RATE_LIMIT_MAX || 500),
@@ -19,8 +24,8 @@ export function createApp() {
 
   app.use(helmet());
   app.use(cors());
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ verify: rawBodySaver }));
+  app.use(express.urlencoded({ extended: true, verify: rawBodySaver }));
   app.use(morgan("dev"));
   app.use("/public", express.static(path.join(process.cwd(), "public")));
 

@@ -5,6 +5,7 @@ import { AppError, badRequest, forbidden, unauthorized } from "../errors/AppErro
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { Attendance } from "../models/Attendance.js";
 import { Branch } from "../models/Branch.js";
+import { User } from "../models/User.js";
 
 const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Karachi";
 const MAX_LOCATION_ACCURACY_METERS = Number(process.env.MAX_LOCATION_ACCURACY_METERS || 50);
@@ -200,6 +201,8 @@ export async function checkInAttendance(req, res) {
     deviceInfo: payload.deviceInfo || null,
   });
 
+  await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_IN" });
+
   return res.status(201).json(
     new ApiResponse(
       201,
@@ -259,6 +262,7 @@ export async function checkOutAttendance(req, res) {
   activeAttendance.status = "COMPLETED";
 
   await activeAttendance.save();
+  await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_OUT" });
 
   return res.json(
     new ApiResponse(
@@ -274,27 +278,54 @@ export async function checkOutAttendance(req, res) {
 }
 
 export async function getMyAttendanceStatus(req, res) {
-  const activeAttendance = await Attendance.findOne({
+  const todayDateKey = getDateKey(new Date());
+
+  const todayAttendance = await Attendance.findOne({
     user: req.user.id,
-    status: "ACTIVE",
+    dateKey: todayDateKey,
   }).lean();
 
-  if (!activeAttendance) {
+  if (!todayAttendance) {
+    await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "ON_BREAK" });
     return res.json(
-      new ApiResponse(200, { checkedIn: false, status: "CHECKED_OUT" }, "No active attendance"),
+      new ApiResponse(
+        200,
+        { checkedIn: false, status: "ON_BREAK", dateKey: todayDateKey },
+        "No check-in found today. User marked as ON_BREAK.",
+      ),
     );
   }
 
+  if (todayAttendance.status === "ACTIVE") {
+    await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_IN" });
+    return res.json(
+      new ApiResponse(
+        200,
+        {
+          checkedIn: true,
+          status: "CHECKED_IN",
+          attendanceId: String(todayAttendance._id),
+          checkInTime: todayAttendance.checkInTime,
+          dateKey: todayDateKey,
+        },
+        "Active attendance found for today",
+      ),
+    );
+  }
+
+  await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_OUT" });
   return res.json(
     new ApiResponse(
       200,
       {
-        checkedIn: true,
-        status: "CHECKED_IN",
-        attendanceId: String(activeAttendance._id),
-        checkInTime: activeAttendance.checkInTime,
+        checkedIn: false,
+        status: "CHECKED_OUT",
+        attendanceId: String(todayAttendance._id),
+        checkInTime: todayAttendance.checkInTime,
+        checkOutTime: todayAttendance.checkOutTime,
+        dateKey: todayDateKey,
       },
-      "Active attendance found",
+      "Attendance already checked out for today",
     ),
   );
 }
