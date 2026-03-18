@@ -14,7 +14,13 @@ const createPlatformUserSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
   phone: z.string().trim().min(8).max(20),
   role: z.enum(STAFF_ROLES),
-  branchId: z.string(),
+  branchId: z
+    .string({ required_error: "branchId is required" })
+    .trim()
+    .min(1, "branchId is required")
+    .refine((value) => mongoose.Types.ObjectId.isValid(value), {
+      message: "branchId must be a valid ObjectId",
+    }),
   isActive: z.boolean().optional(),
 });
 
@@ -48,21 +54,22 @@ export async function createPlatformUser(req, res) {
 
   const parsed = createPlatformUserSchema.safeParse(req.body);
   if (!parsed.success) {
-    throw badRequest("Invalid request payload", parsed.error.flatten());
+    const flattened = parsed.error.flatten();
+    const branchErrors = flattened.fieldErrors?.branchId || [];
+    if (branchErrors.length > 0) {
+      throw badRequest("branchId is required and must be valid", flattened);
+    }
+    throw badRequest("Invalid request payload", flattened);
   }
 
   const payload = parsed.data;
   const phone = sanitizePhone(payload.phone);
 
-  // Use branchId from request body if provided, otherwise use authenticated user's branchId
-  const branchId = payload.branchId || req.user?.branchId;
+  const branchId = payload.branchId;
 
-  let branch = null;
-  if (branchId && isValidObjectId(branchId)) {
-    branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
-    if (!branch) {
-      throw badRequest("The specified branch is invalid or inactive");
-    }
+  const branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
+  if (!branch) {
+    throw badRequest("The specified branch is invalid or inactive");
   }
 
   const existingUser = await User.findOne({ phone }).lean();

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS } from "../constants/ticketStatus.js";
+import { ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
 
 const ticketSchema = new mongoose.Schema(
   {
@@ -62,6 +63,12 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    entryMethod: {
+      type: String,
+      enum: ENTRY_METHOD_VALUES,
+      default: undefined,
+      index: true,
+    },
     slot: {
       type: String,
       default: "",
@@ -73,6 +80,22 @@ const ticketSchema = new mongoose.Schema(
     keyTag: {
       type: String,
       default: "",
+    },
+    parkedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    keyReceivedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    keyReceivedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
     },
     keyNote: {
       type: String,

@@ -27,6 +27,18 @@ export async function requireAuth(req, _res, next) {
 
     next();
   } catch (error) {
+    if (error?.name === "TokenExpiredError") {
+      return next(
+        unauthorized("Access token expired. Please login again", {
+          expiredAt: error.expiredAt,
+        }),
+      );
+    }
+
+    if (error?.name === "JsonWebTokenError" || error?.name === "NotBeforeError") {
+      return next(unauthorized("Invalid access token"));
+    }
+
     next(error);
   }
 }

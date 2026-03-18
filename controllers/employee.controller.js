@@ -8,6 +8,9 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { STAFF_ROLES } from "../constants/roles.js";
 import "../models/Location.js";
 
+const KEY_HANDOVER_SLA_MINUTES = Number(process.env.KEY_HANDOVER_SLA_MINUTES || 3);
+const KEY_HANDOVER_SLA_SECONDS = Math.max(1, Math.floor(KEY_HANDOVER_SLA_MINUTES * 60));
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 function isValidObjectId(value) {
@@ -21,6 +24,69 @@ function formatDuration(seconds) {
   if (mins > 0 && secs > 0) return `${mins}m ${secs}s`;
   if (mins > 0) return `${mins}m`;
   return `${secs}s`;
+}
+
+function buildKeyHandoverRecord(ticket) {
+  const parkedAt = ticket?.parkedAt ? new Date(ticket.parkedAt) : null;
+  const keyReceivedAt = ticket?.keyReceivedAt ? new Date(ticket.keyReceivedAt) : null;
+
+  if (!parkedAt) {
+    return {
+      keyStatus: "NOT_APPLICABLE",
+      keyDeliverySeconds: 0,
+      keyDelaySeconds: 0,
+      isDelayed: false,
+    };
+  }
+
+  if (keyReceivedAt) {
+    const deliverySeconds = Math.max(0, Math.floor((keyReceivedAt.getTime() - parkedAt.getTime()) / 1000));
+    const delaySeconds = Math.max(0, deliverySeconds - KEY_HANDOVER_SLA_SECONDS);
+    return {
+      keyStatus: "KEY_RECEIVED",
+      keyDeliverySeconds: deliverySeconds,
+      keyDelaySeconds: delaySeconds,
+      isDelayed: delaySeconds > 0,
+    };
+  }
+
+  const dueAtMs = parkedAt.getTime() + KEY_HANDOVER_SLA_SECONDS * 1000;
+  const delaySeconds = Date.now() > dueAtMs
+    ? Math.floor((Date.now() - dueAtMs) / 1000)
+    : 0;
+
+  return {
+    keyStatus: "KEY_PENDING",
+    keyDeliverySeconds: 0,
+    keyDelaySeconds: delaySeconds,
+    isDelayed: delaySeconds > 0,
+  };
+}
+
+function calculateDriverKeyMetrics(tickets) {
+  let timesDelayed = 0;
+  let totalDeliverySeconds = 0;
+  let deliveredCount = 0;
+
+  for (const ticket of tickets) {
+    const keyRecord = buildKeyHandoverRecord(ticket);
+    if (keyRecord.isDelayed) {
+      timesDelayed += 1;
+    }
+    if (keyRecord.keyStatus === "KEY_RECEIVED" && keyRecord.keyDeliverySeconds > 0) {
+      totalDeliverySeconds += keyRecord.keyDeliverySeconds;
+      deliveredCount += 1;
+    }
+  }
+
+  const avgKeyDeliveryTime = deliveredCount > 0
+    ? Math.round(totalDeliverySeconds / deliveredCount)
+    : 0;
+
+  return {
+    timesDelayed,
+    avgKeyDeliveryTime,
+  };
 }
 
 
@@ -183,6 +249,22 @@ export async function getEmployeeDetails(req, res) {
   const location        = user.branch?.name    || null;
   const locationAddress = user.branch?.address || null;
 
+  let dynamicTimesDelayed = profile.timesDelayed;
+  let dynamicAvgKeyDeliveryTime = profile.avgKeyDeliveryTime;
+
+  if (user.role === "DRIVER") {
+    const driverTickets = await Ticket.find({
+      assignedDriver: id,
+      parkedAt: { $ne: null },
+    })
+      .select("parkedAt keyReceivedAt")
+      .lean();
+
+    const metrics = calculateDriverKeyMetrics(driverTickets);
+    dynamicTimesDelayed = metrics.timesDelayed;
+    dynamicAvgKeyDeliveryTime = metrics.avgKeyDeliveryTime;
+  }
+
   // ── Build response ─────────────────────────────────────────────────────────
   const result = {
     // ── Header (profile photo, name, status badge, violation badge)
@@ -204,8 +286,9 @@ export async function getEmployeeDetails(req, res) {
     timing,                                   // 08:00 AM - 05:00 PM  (null if not set)
 
     // ── Key Handover Details section
-    timesDelayed:               profile.timesDelayed,        // 4
-    avgKeyDeliveryTimeFormatted: formatDuration(profile.avgKeyDeliveryTime), // 2m 30s
+    timesDelayed:               dynamicTimesDelayed,        // 4
+    avgKeyDeliveryTime:         dynamicAvgKeyDeliveryTime,
+    avgKeyDeliveryTimeFormatted: formatDuration(dynamicAvgKeyDeliveryTime), // 2m 30s
   };
 
   res.status(200).json(
@@ -239,20 +322,23 @@ export async function getEmployeeTickets(req, res) {
     .populate("branch", "name address")
     .lean();
 
-  const ticketResults = tickets.map((t) => ({
-    id:           String(t._id),
-    ticketNumber: t.ticketNumber,          // e.g. "921680" — Ticket Number column
-    numberPlate:  t.vehicle?.plate || "",  // e.g. "BB 777" — Number Plate column
-    vehicleDisplay: t.vehicle             // e.g. "BMW - X6" — vehicle make+model
-      ? `${t.vehicle.make} - ${t.vehicle.model}`.trim()
-      : "",
-    vehicleColor: t.vehicle?.color || "", // e.g. "Black" — shown below vehicle name
-    keyTag:       t.keyTag || "",         // e.g. "28" — Key Tag column
-    location:     t.location?.name || t.branch?.name || "", // e.g. "Al Jeewan Street"
-    paymentStatus: t.payment?.status || "PENDING", // "PAID" / "PENDING" badge
-    createdAt:    t.createdAt,
-  }));
-
+  const ticketResults = tickets.map((t) => {
+    const keyHandover = buildKeyHandoverRecord(t);
+    return {
+      id: String(t._id),
+      ticketNumber: t.ticketNumber,
+      numberPlate: t.vehicle?.plate || "",
+      vehicleDisplay: t.vehicle ? `${t.vehicle.make} - ${t.vehicle.model}`.trim() : "",
+      vehicleColor: t.vehicle?.color || "",
+      keyTag: t.keyTag || "",
+      location: t.location?.name || t.branch?.name || "",
+      paymentStatus: t.payment?.status || "PENDING",
+      parkedAt: t.parkedAt || null,
+      keyReceivedAt: t.keyReceivedAt || null,
+      keyHandover,
+      createdAt: t.createdAt,
+    };
+  });
   res.status(200).json(
     new ApiResponse(
       200,
@@ -415,3 +501,4 @@ export async function toggleBreak(req, res) {
     ),
   );
 }
+
