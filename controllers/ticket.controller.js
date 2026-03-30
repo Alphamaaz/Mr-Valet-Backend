@@ -201,8 +201,9 @@ function buildKeyControlMeta(ticket) {
   };
 }
 
-function buildWhatsAppPrefillLink(valetCode) {
-  const command = `/park my car ${valetCode}`;
+function buildWhatsAppPrefillLink(identifier) {
+  const value = String(identifier || "").trim();
+  const command = `/park my car ${value}`;
   const businessPhone = (process.env.WHATSAPP_BUSINESS_PHONE || "").replace(/\D/g, "");
   const encodedText = encodeURIComponent(command);
 
@@ -535,6 +536,10 @@ export async function processEntryMethod(req, res) {
   }
 
   const isSmsEntry = parsed.data.entryMethod === ENTRY_METHODS.SMS;
+  const isPrintEntry = [
+    ENTRY_METHODS.PRINTER,
+    ENTRY_METHODS.SERIALIZED_PAPER,
+  ].includes(parsed.data.entryMethod);
   const ownerType = parsed.data.ownerHasApp ? OWNER_TYPES.APP : OWNER_TYPES.WHATSAPP;
 
   if (parsed.data.ownerPhone !== undefined) {
@@ -554,13 +559,17 @@ export async function processEntryMethod(req, res) {
     color: ticket.vehicle?.color || "",
   };
   const paymentLink = buildPaymentLink(ticket);
-  const { command: whatsappCommand, link: whatsappPrefillLink } = buildWhatsAppPrefillLink(ticket.valetCode);
+  const whatsappIdentifier = String(vehicleDetails.plate || ticket.valetCode || "").trim();
+  const { command: whatsappCommand, link: whatsappPrefillLink } = buildWhatsAppPrefillLink(whatsappIdentifier);
   const ownerAppQrPayload = buildOwnerAppScanPayload(ticket);
 
   let qrTarget = "APP_SCANNER";
   let qrTargetLink = ownerAppQrPayload;
 
-  if (isSmsEntry) {
+  if (isPrintEntry) {
+    qrTarget = "PRINT";
+    qrTargetLink = "";
+  } else if (isSmsEntry) {
     qrTarget = "SMS";
     qrTargetLink = "";
   } else if (!parsed.data.ownerHasApp) {
@@ -618,6 +627,20 @@ export async function processEntryMethod(req, res) {
     vehicleDetails,
     paymentLink,
     smsDelivery,
+    printableTicket: isPrintEntry
+      ? {
+        ticketNumber: ticket.ticketNumber,
+        valetCode: ticket.valetCode,
+        plate: vehicleDetails.plate,
+        make: vehicleDetails.make,
+        model: vehicleDetails.model,
+        color: vehicleDetails.color,
+        garage: ticket.garage || "",
+        slot: ticket.slot || "",
+        keyTag: ticket.keyTag || "",
+        receivingPoint: ticket.receivingPoint || "",
+      }
+      : null,
   };
 
   if (qrTarget === "WHATSAPP") {
@@ -630,7 +653,9 @@ export async function processEntryMethod(req, res) {
 
   const responseMessage = smsDelivery?.status === "FAILED"
     ? "Entry method saved, but SMS delivery failed"
-    : "Entry method processed successfully";
+    : isPrintEntry
+      ? "Entry method processed successfully (print ticket ready)"
+      : "Entry method processed successfully";
 
   return res.status(200).json(
     new ApiResponse(
@@ -1216,10 +1241,7 @@ export async function createManualCarArrival(req, res) {
         valetCode: ticket.valetCode,
         status: ticket.status,
         vehicle: vehicleDetails,
-        nextActions: {
-          assignDriverEndpoint: `/api/v1/tickets/${ticket._id}/assign-driver`,
-          processEntryMethodEndpoint: `/api/v1/tickets/${ticket._id}/process-entry-method`,
-        },
+        
       },
       "Car arrival captured successfully",
     ),

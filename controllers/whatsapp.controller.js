@@ -1,5 +1,6 @@
 import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
+import { Vehicle } from "../models/Vehicle.js";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
 import { isValidWhatsAppSignature, sendWhatsAppTextMessage } from "../services/whatsapp.service.js";
@@ -18,20 +19,31 @@ function buildPaymentLink(ticketNumber) {
   return `${normalizedBase}/pay?ticket=${encodeURIComponent(ticketNumber)}`;
 }
 
+function escapeRegex(input) {
+  return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeIdentifier(input) {
+  return String(input || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
+
 function parseCommand(text) {
   const input = String(text || "").trim();
   if (!input) {
     return null;
   }
 
-  const parkMatch = input.match(/^\/park\s+my\s+car\s+([A-Za-z0-9-]+)$/i);
+  const parkMatch = input.match(/^\/park\s+my\s+car\s+(.+)$/i);
   if (parkMatch) {
-    return { type: "PARK", valetCode: parkMatch[1].toUpperCase() };
+    return { type: "PARK", identifier: normalizeIdentifier(parkMatch[1]) };
   }
 
-  const requestMatch = input.match(/^\/request\s+([A-Za-z0-9-]+)$/i);
+  const requestMatch = input.match(/^\/request\s+(.+)$/i);
   if (requestMatch) {
-    return { type: "REQUEST", valetCode: requestMatch[1].toUpperCase() };
+    return { type: "REQUEST", identifier: normalizeIdentifier(requestMatch[1]) };
   }
 
   return null;
@@ -66,22 +78,53 @@ function extractIncomingMessages(payload) {
 async function sendUsageHelp(phone) {
   await sendWhatsAppTextMessage({
     phone,
-    message: "Use one of these commands:\n/park my car LSA-009\n/request LSA-009",
+    message: "Use one of these commands:\n/park my car BB 777\n/request BB 777\n(Valet code also works)",
   });
 }
 
-async function handleParkCommand({ from, valetCode }) {
-  const ticket = await Ticket.findOne({
-    valetCode,
+async function findWhatsAppTicketByIdentifier(identifier) {
+  const normalized = normalizeIdentifier(identifier);
+  if (!normalized) {
+    return null;
+  }
+
+  const byValetCode = await Ticket.findOne({
+    valetCode: normalized,
     ownerType: OWNER_TYPES.WHATSAPP,
   })
     .populate("assignedDriver", "fullName")
+    .populate("vehicle", "plate")
     .lean();
+  if (byValetCode) {
+    return byValetCode;
+  }
+
+  const platePattern = `^${escapeRegex(normalized).replace(/\s+/g, "\\s*")}$`;
+  const plateRegex = new RegExp(platePattern, "i");
+  const vehicles = await Vehicle.find({ plate: plateRegex }).select("_id").lean();
+  const vehicleIds = vehicles.map((vehicle) => vehicle._id);
+  if (!vehicleIds.length) {
+    return null;
+  }
+
+  return Ticket.findOne({
+    vehicle: { $in: vehicleIds },
+    ownerType: OWNER_TYPES.WHATSAPP,
+    status: { $nin: [TICKET_STATUS.CANCELLED, TICKET_STATUS.COMPLETED] },
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .populate("assignedDriver", "fullName")
+    .populate("vehicle", "plate")
+    .lean();
+}
+
+async function handleParkCommand({ from, identifier }) {
+  const ticket = await findWhatsAppTicketByIdentifier(identifier);
 
   if (!ticket) {
     await sendWhatsAppTextMessage({
       phone: from,
-      message: `Valet code ${valetCode} was not found. Please scan the employee QR again.`,
+      message: `No active ticket found for "${identifier}". Please scan the employee QR again.`,
     });
     return;
   }
@@ -109,16 +152,13 @@ async function handleParkCommand({ from, valetCode }) {
   });
 }
 
-async function handleRequestCommand({ from, valetCode }) {
-  const ticket = await Ticket.findOne({
-    valetCode,
-    ownerType: OWNER_TYPES.WHATSAPP,
-  });
+async function handleRequestCommand({ from, identifier }) {
+  const ticket = await findWhatsAppTicketByIdentifier(identifier);
 
   if (!ticket) {
     await sendWhatsAppTextMessage({
       phone: from,
-      message: `Valet code ${valetCode} was not found. Please scan the employee QR again.`,
+      message: `No active ticket found for "${identifier}". Please scan the employee QR again.`,
     });
     return;
   }
@@ -180,12 +220,12 @@ async function processIncomingMessage(message) {
   }
 
   if (command.type === "PARK") {
-    await handleParkCommand({ from: message.from, valetCode: command.valetCode });
+    await handleParkCommand({ from: message.from, identifier: command.identifier });
     return;
   }
 
   if (command.type === "REQUEST") {
-    await handleRequestCommand({ from: message.from, valetCode: command.valetCode });
+    await handleRequestCommand({ from: message.from, identifier: command.identifier });
     return;
   }
 

@@ -50,7 +50,7 @@ __pycache__/
 venv/
 env/
 .env
-# .env.example
+.env.example
 
 # =========================
 # Java
