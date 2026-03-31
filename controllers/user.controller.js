@@ -4,23 +4,19 @@ import fs from "fs";
 import path from "path";
 import { conflict, badRequest, forbidden, notFound } from "../errors/AppError.js";
 import { User } from "../models/User.js";
-import { STAFF_ROLES } from "../constants/roles.js";
+import { ROLES, STAFF_ROLES } from "../constants/roles.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { Branch } from "../models/Branch.js";
 import { ChatGroup } from "../models/ChatGroup.js";
 import { Message } from "../models/Message.js";
 
+const PLATFORM_USER_ROLES = Object.freeze([...STAFF_ROLES, ROLES.OWNER]);
+
 const createPlatformUserSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
   phone: z.string().trim().min(8).max(20),
-  role: z.enum(STAFF_ROLES),
-  branchId: z
-    .string({ required_error: "branchId is required" })
-    .trim()
-    .min(1, "branchId is required")
-    .refine((value) => mongoose.Types.ObjectId.isValid(value), {
-      message: "branchId must be a valid ObjectId",
-    }),
+  role: z.enum(PLATFORM_USER_ROLES),
+  branchId: z.string().trim().optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -64,12 +60,18 @@ export async function createPlatformUser(req, res) {
 
   const payload = parsed.data;
   const phone = sanitizePhone(payload.phone);
+  const isStaffRole = STAFF_ROLES.includes(payload.role);
 
-  const branchId = payload.branchId;
+  let branch = null;
+  if (isStaffRole) {
+    if (!payload.branchId || !isValidObjectId(payload.branchId)) {
+      throw badRequest("branchId is required and must be a valid ObjectId for staff users");
+    }
 
-  const branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
-  if (!branch) {
-    throw badRequest("The specified branch is invalid or inactive");
+    branch = await Branch.findOne({ _id: payload.branchId, isActive: true }).lean();
+    if (!branch) {
+      throw badRequest("The specified branch is invalid or inactive");
+    }
   }
 
   const existingUser = await User.findOne({ phone }).lean();
@@ -81,7 +83,7 @@ export async function createPlatformUser(req, res) {
     fullName: payload.fullName,
     phone,
     role: payload.role,
-    branch: branch?._id || null,
+    branch: isStaffRole ? (branch?._id || null) : null,
     isActive: payload.isActive ?? true,
   });
 

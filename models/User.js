@@ -25,9 +25,7 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Branch",
       required() {
-        // TODO: For testing - branch is optional regardless of role
-        return true;
-        // return STAFF_ROLES.includes(this.role);
+        return STAFF_ROLES.includes(this.role);
       },
       default: null,
       index: true,

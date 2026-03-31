@@ -6,6 +6,7 @@ import { LoginOtp } from "../models/LoginOtp.js";
 import { signAccessToken } from "../utils/token.js";
 import { sendOtpSms } from "../services/twilio.service.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import { ROLES } from "../constants/roles.js";
 
 const requestOtpSchema = z.object({
   phone: z.string().trim().min(8).max(20),
@@ -77,9 +78,19 @@ export async function requestOtp(req, res) {
   }
 
   const phone = sanitizePhone(parsed.data.phone);
-  const member = await User.findOne({ phone, isActive: true }).lean();
+  let member = await User.findOne({ phone });
   if (!member) {
-    throw unauthorized("Only registered members can request OTP");
+    member = await User.create({
+      phone,
+      role: ROLES.OWNER,
+      fullName: "",
+      branch: null,
+      isActive: true,
+    });
+  }
+
+  if (!member.isActive) {
+    throw unauthorized("Your account is inactive. Please contact support");
   }
 
   const otpCode = canUseMockOtp() ? (process.env.MOCK_OTP_CODE || "000000") : generateOtpCode(6);
