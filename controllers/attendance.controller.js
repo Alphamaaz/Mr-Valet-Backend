@@ -1,16 +1,17 @@
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
+import QRCode from "qrcode";
 import { AppError, badRequest, forbidden, unauthorized } from "../errors/AppError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { Attendance } from "../models/Attendance.js";
 import { Branch } from "../models/Branch.js";
 import { User } from "../models/User.js";
+import { ROLES } from "../constants/roles.js";
 
 const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Karachi";
 const MAX_LOCATION_ACCURACY_METERS = Number(process.env.MAX_LOCATION_ACCURACY_METERS || 50);
 const MAX_LOCATION_AGE_SECONDS = Number(process.env.MAX_LOCATION_AGE_SECONDS || 15);
-const ATTENDANCE_QR_EXPIRY_SECONDS = Number(process.env.ATTENDANCE_QR_EXPIRY_SECONDS || 60);
 
 const attendancePayloadSchema = z.object({
   qrToken: z.string().trim().min(10),
@@ -19,6 +20,11 @@ const attendancePayloadSchema = z.object({
   accuracyMeters: z.number().nonnegative().optional(),
   capturedAt: z.string().datetime().optional(),
   deviceInfo: z.record(z.string(), z.any()).optional(),
+});
+
+const generateAttendanceQrCodeSchema = z.object({
+  branchId: z.string().trim().min(1),
+  expiresInSeconds: z.coerce.number().int().min(60).max(315360000).optional(),
 });
 
 function getAttendanceQrSecret() {
@@ -99,6 +105,23 @@ function validateLocationAccuracy(accuracyMeters) {
   }
 }
 
+async function resolveBranchForQrGeneration(req, branchId) {
+  if (req.user.role !== ROLES.SUPER_ADMIN) {
+    throw forbidden("Only super admin can generate attendance QR code");
+  }
+
+  const branch = await Branch.findOne({
+    _id: branchId,
+    isActive: true,
+  }).lean();
+
+  if (!branch) {
+    throw badRequest("Branch is invalid or inactive");
+  }
+
+  return branch;
+}
+
 async function getActiveBranchForUser(req) {
   if (!req.user?.branchId) {
     throw forbidden("User is not assigned to a branch");
@@ -116,29 +139,51 @@ async function getActiveBranchForUser(req) {
   return branch;
 }
 
-export async function generateAttendanceQrToken(req, res) {
-  if (!req.user?.branchId) {
-    throw forbidden("User is not assigned to a branch");
+export async function generateAttendanceQrCode(req, res) {
+  const parsed = generateAttendanceQrCodeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
   }
 
-  const token = jwt.sign(
+  const branch = await resolveBranchForQrGeneration(req, parsed.data.branchId);
+
+  const signOptions = {};
+  if (parsed.data.expiresInSeconds !== undefined) {
+    signOptions.expiresIn = parsed.data.expiresInSeconds;
+  }
+
+  const qrToken = jwt.sign(
     {
       purpose: "ATTENDANCE",
-      branchId: req.user.branchId,
+      branchId: String(branch._id),
       jti: crypto.randomUUID(),
+      issuedFor: "PRINTED_QR",
     },
     getAttendanceQrSecret(),
-    { expiresIn: ATTENDANCE_QR_EXPIRY_SECONDS },
+    signOptions,
   );
 
-  return res.json(
+  const qrImageDataUrl = await QRCode.toDataURL(qrToken, {
+    errorCorrectionLevel: "M",
+    margin: 2,
+    width: 512,
+  });
+
+  return res.status(201).json(
     new ApiResponse(
-      200,
+      201,
       {
-        qrToken: token,
-        expiresInSeconds: ATTENDANCE_QR_EXPIRY_SECONDS,
+        branch: {
+          id: String(branch._id),
+          name: branch.name,
+          code: branch.code,
+          address: branch.address,
+        },
+        qrToken,
+        qrImageDataUrl,
+        expiresInSeconds: parsed.data.expiresInSeconds ?? null,
       },
-      "Attendance QR token generated",
+      "Attendance QR code generated successfully",
     ),
   );
 }

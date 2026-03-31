@@ -5,7 +5,7 @@ import { ROLES, STAFF_ROLES } from "../constants/roles.js";
 import {
   checkInAttendance,
   checkOutAttendance,
-  generateAttendanceQrToken,
+  generateAttendanceQrCode,
   getMyAttendanceStatus,
 } from "../controllers/attendance.controller.js";
 
@@ -17,7 +17,7 @@ router.use(requireRoles(...STAFF_ROLES));
 router.get("/status", asyncHandler(getMyAttendanceStatus));
 router.post("/check-in", asyncHandler(checkInAttendance));
 router.post("/check-out", asyncHandler(checkOutAttendance));
-router.get("/qr-token", requireRoles(ROLES.RECEPTIONIST), asyncHandler(generateAttendanceQrToken));
+router.post("/qr-code", requireRoles(ROLES.SUPER_ADMIN), asyncHandler(generateAttendanceQrCode));
 
 export default router;
 
