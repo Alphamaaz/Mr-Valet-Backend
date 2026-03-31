@@ -9,6 +9,8 @@ import whatsappRoutes from "./whatsapp.routes.js";
 import chatRoutes from "./chat.routes.js";
 import employeeRoutes from "./employee.routes.js";
 import dashboardRoutes from "./dashboard.routes.js";
+import subscriptionRoutes from "./subscription.routes.js";
+import serviceRoutes from "./service.routes.js";
 
 const router = Router();
 
@@ -22,5 +24,7 @@ router.use("/v1/whatsapp", whatsappRoutes);
 router.use("/v1/chat", chatRoutes);
 router.use("/v1/employees", employeeRoutes);
 router.use("/v1/dashboard", dashboardRoutes);
+router.use("/v1/subscriptions", subscriptionRoutes);
+router.use("/v1/services", serviceRoutes);
 
 export default router;
