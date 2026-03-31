@@ -4,6 +4,7 @@ export const ROLES = Object.freeze({
   KEY_CONTROLLER: "KEY_CONTROLLER",
   SUPERVISOR: "SUPERVISOR",
   OWNER: "OWNER",
+  SUPER_ADMIN: "SUPER_ADMIN",
 });
 
 export const STAFF_ROLES = Object.freeze([
@@ -11,5 +12,6 @@ export const STAFF_ROLES = Object.freeze([
   ROLES.DRIVER,
   ROLES.KEY_CONTROLLER,
   ROLES.SUPERVISOR,
+  ROLES.SUPER_ADMIN,
 ]);
 

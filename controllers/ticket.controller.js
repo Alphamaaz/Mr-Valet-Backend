@@ -373,6 +373,50 @@ async function emitRetrievalRequestedToOps({
   }
 }
 
+// ─── Real-time: Notify car OWNER when ticket status changes ───────────────────
+// Covers: PARKED, ON_THE_WAY, DELIVERED
+
+const STATUS_MESSAGES = {
+  [TICKET_STATUS.PARKED]:               "Your car has been parked safely.",
+  [TICKET_STATUS.ON_THE_WAY]:           "Your car is on the way to the receiving point.",
+  [TICKET_STATUS.DELIVERED]:            "Your car is ready for pickup. Please mark as complete.",
+  [TICKET_STATUS.RETRIEVAL_REQUESTED]:  "Your retrieval request is being processed.",
+};
+
+async function emitTicketStatusToOwner({ req, ticket }) {
+  try {
+    const io = req.app?.get("io");
+    if (!io) return;
+
+    // Resolve the owner's userId from the ticket
+    let ownerUserId = ticket.ownerUser ? String(ticket.ownerUser) : null;
+
+    // Fallback: look up by phone
+    if (!ownerUserId && ticket.ownerPhone) {
+      const ownerUser = await User.findOne({ phone: ticket.ownerPhone })
+        .select("_id")
+        .lean();
+      if (ownerUser) ownerUserId = String(ownerUser._id);
+    }
+
+    if (!ownerUserId) return; // anonymous owner — cannot push
+
+    const message = STATUS_MESSAGES[ticket.status] || `Ticket status updated to ${ticket.status}`;
+
+    io.to(`user_${ownerUserId}`).emit("ticket_status_update", {
+      ticketId:       String(ticket._id),
+      ticketNumber:   ticket.ticketNumber,
+      status:         ticket.status,
+      message,
+      receivingPoint: ticket.receivingPoint || null,
+      updatedAt:      new Date().toISOString(),
+    });
+
+    console.log(`[Socket.IO] Emitted ticket_status_update (${ticket.status}) → owner ${ownerUserId}`);
+  } catch (error) {
+    console.error("[Socket.IO] Failed to emit ticket_status_update:", error?.message || error);
+  }
+}
 
 
 export async function assignDriver(req, res) {
@@ -722,6 +766,17 @@ export async function updateTicketStatus(req, res) {
       req,
       ticket,
     });
+  }
+
+  // ── Notify car owner in real-time for key status changes ──────────────────
+  const ownerNotifyStatuses = [
+    TICKET_STATUS.PARKED,
+    TICKET_STATUS.ON_THE_WAY,
+    TICKET_STATUS.DELIVERED,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
+  ];
+  if (ownerNotifyStatuses.includes(nextStatus)) {
+    void emitTicketStatusToOwner({ req, ticket });
   }
 
   return res.status(200).json({
@@ -1222,6 +1277,90 @@ export async function createManualCarArrival(req, res) {
         },
       },
       "Car arrival captured successfully",
+    ),
+  );
+}
+
+// ─── PATCH /api/v1/tickets/:ticketId/park ─────────────────────────────────────
+// Driver submits parking details (slot, keyTag, keyNote, photo) after parking
+// Transitions ticket status: ASSIGNED → PARKED
+
+const parkCarSchema = z.object({
+  slot:    z.string().trim().max(60).optional(),
+  keyTag:  z.string().trim().max(40).optional(),
+  keyNote: z.string().trim().max(300).optional(),
+});
+
+export async function parkCar(req, res) {
+  const { ticketId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(ticketId)) {
+    throw badRequest("Invalid ticket ID");
+  }
+
+  const parsed = parkCarSchema.safeParse(req.body);
+  if (!parsed.success) throw badRequest("Invalid parking data", parsed.error.flatten());
+
+  const ticket = await Ticket.findById(ticketId);
+  if (!ticket) throw notFound("Ticket not found");
+
+  // Only the assigned driver can park this ticket
+  if (String(ticket.assignedDriver) !== req.user.id) {
+    throw forbidden("You are not the assigned driver for this ticket");
+  }
+
+  // Ticket must be ASSIGNED or NOT_PARKED to be marked as parked
+  const allowedStatuses = [TICKET_STATUS.ASSIGNED, TICKET_STATUS.NOT_PARKED];
+  if (!allowedStatuses.includes(ticket.status)) {
+    throw conflict(
+      `Cannot park ticket. Current status is "${ticket.status}". Must be ASSIGNED or NOT_PARKED.`,
+    );
+  }
+
+  // Build the parked car photo path if uploaded
+  const baseUrl   = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+  const photoPath = req.file ? `/public/parked/${req.file.filename}` : null;
+  const photoUrl  = photoPath ? `${baseUrl}${photoPath}` : null;
+
+  // Update ticket fields
+  const updates = {
+    status:  TICKET_STATUS.PARKED,
+    slot:    parsed.data.slot    ?? ticket.slot,
+    keyTag:  parsed.data.keyTag  ?? ticket.keyTag,
+    keyNote: parsed.data.keyNote ?? ticket.keyNote,
+  };
+
+  if (photoPath) updates["meta.parkedPhotoPath"] = photoPath;
+
+  Object.assign(ticket, updates);
+  await ticket.save();
+
+  // Log the parking event
+  await TicketEvent.create({
+    ticket: ticket._id,
+    status: TICKET_STATUS.PARKED,
+    actor:  req.user.id,
+    note:   parsed.data.keyNote || "",
+    meta: {
+      slot:       parsed.data.slot   || null,
+      keyTag:     parsed.data.keyTag || null,
+      photoPath,
+    },
+  });
+
+  return res.json(
+    new ApiResponse(
+      200,
+      {
+        ticketId:     String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        status:       ticket.status,
+        slot:         ticket.slot,
+        keyTag:       ticket.keyTag,
+        keyNote:      ticket.keyNote,
+        parkedPhotoUrl: photoUrl,
+      },
+      "Car parked successfully",
     ),
   );
 }

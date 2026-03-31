@@ -12,11 +12,13 @@ import {
   markKeyReceived,
   processEntryMethod,
   updateTicketStatus,
+  parkCar,
 } from "../controllers/ticket.controller.js";
 import { requireAuth, requireRoles } from "../middleware/auth.js";
 import { ROLES } from "../constants/roles.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { uploadDamagePhotos } from "../middleware/uploadDamagePhotos.js";
+import { uploadParkedPhoto } from "../middleware/uploadParkedPhoto.js";
 
 const router = Router();
 
@@ -108,6 +110,14 @@ router.get(
   "/:ticketId/damage-claims",
   requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR),
   asyncHandler(getDamageClaims),
+);
+
+// PATCH /:ticketId/park  — Driver confirms parking with slot, keyTag, keyNote and optional photo
+router.patch(
+  "/:ticketId/park",
+  requireRoles(ROLES.DRIVER),
+  uploadParkedPhoto,
+  asyncHandler(parkCar),
 );
 
 export default router;
