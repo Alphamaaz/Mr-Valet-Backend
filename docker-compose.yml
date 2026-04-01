@@ -11,6 +11,9 @@ services:
       NODE_ENV: production
       PORT: ${PORT:-4000}
       REDIS_URL: redis://redis:6379
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - "5001:${PORT:-5000}"
     depends_on:
@@ -22,6 +25,9 @@ services:
     container_name: mr_valet_redis
     restart: unless-stopped
     command: redis-server --appendonly yes
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - redis_data:/data
     healthcheck:
