@@ -1,8 +1,10 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRoles } from "../middleware/auth.js";
+import { ROLES } from "../constants/roles.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import {
   getEmployees,
+  getFreeDrivers,
   getEmployeeDetails,
   getEmployeeTickets,
   updateEmployeeProfile,
@@ -17,6 +19,13 @@ router.use(requireAuth);
 
 // GET  /api/v1/employees                         – List employees (filter by role)
 router.get("/", asyncHandler(getEmployees));
+
+// GET  /api/v1/employees/drivers/free            – List fully available drivers
+router.get(
+  "/drivers/free",
+  requireRoles(ROLES.OWNER, ROLES.SUPER_ADMIN, ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.KEY_CONTROLLER),
+  asyncHandler(getFreeDrivers),
+);
 
 // GET  /api/v1/employees/:id                     – Employee details (personal + other + key handover)
 router.get("/:id", asyncHandler(getEmployeeDetails));

@@ -211,6 +211,54 @@ export async function getEmployees(req, res) {
   );
 }
 
+// ─── GET /api/v1/employees/drivers/free ───────────────────────────────────────
+// Get all drivers who are CHECKED_IN but NOT assigned to an active task
+// (Active task = ASSIGNED, NOT_PARKED, ON_THE_WAY)
+// If ticket is PARKED, driver is free.
+
+export async function getFreeDrivers(req, res) {
+  // 1. Find tickets that are actively being worked on by drivers
+  const busyStatuses = ["ASSIGNED", "NOT_PARKED", "ON_THE_WAY"];
+  const activeTickets = await Ticket.find({
+    status: { $in: busyStatuses },
+    branch: req.user.branchId, // only for the current branch
+    assignedDriver: { $ne: null },
+  }).lean();
+
+  const busyDriverIds = activeTickets.map((t) => String(t.assignedDriver));
+  console.log(busyDriverIds);
+
+  // 2. Find drivers who are checked in and NOT in the busy list
+  const filter = {
+    role: "DRIVER",
+    isActive: true,
+    attendanceStatus: "CHECKED_IN",
+    _id: { $nin: busyDriverIds },
+  };
+
+  if (req.user?.branchId && isValidObjectId(req.user.branchId)) {
+    filter.branch = req.user.branchId;
+  }
+
+  const freeDrivers = await User.find(filter)
+
+    .sort({ fullName: 1 })
+    .select("fullName phone profileImage attendanceStatus")
+    .lean();
+
+  const drivers = freeDrivers.map((u) => ({
+    id: String(u._id),
+    fullName: u.fullName,
+    phone: u.phone,
+    profileImageUrl: buildImageUrl(req, u.profileImage),
+    attendanceStatus: u.attendanceStatus,
+  }));
+
+  res.status(200).json(
+    new ApiResponse(200, { drivers }, "Free drivers fetched successfully"),
+  );
+}
+
 // ─── 2. GET /api/v1/employees/:id ─────────────────────────────────────────────
 //  Employee profile — "Information" tab (personal details + other details + key handover)
 
