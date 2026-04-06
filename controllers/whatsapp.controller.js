@@ -4,6 +4,7 @@ import { Vehicle } from "../models/Vehicle.js";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
 import { isValidWhatsAppSignature, sendWhatsAppTextMessage } from "../services/whatsapp.service.js";
+import { generateTicketNumber, generateValetCode } from "../utils/idGenerator.js";
 
 function normalizePhone(phone) {
   return String(phone || "").replace(/\D/g, "");
@@ -28,6 +29,15 @@ function normalizeIdentifier(input) {
     .trim()
     .replace(/\s+/g, " ")
     .toUpperCase();
+}
+
+async function findActiveRetrievalTicketForSource(sourceTicketId) {
+  return Ticket.findOne({
+    sourceTicket: sourceTicketId,
+    status: {
+      $in: [TICKET_STATUS.RETRIEVAL_REQUESTED, TICKET_STATUS.ON_THE_WAY],
+    },
+  }).sort({ createdAt: -1 });
 }
 
 function parseCommand(text) {
@@ -133,7 +143,7 @@ async function handleParkCommand({ from, identifier }) {
   if (linkedOwnerPhone && linkedOwnerPhone !== from) {
     await sendWhatsAppTextMessage({
       phone: from,
-      message: `Valet code ${valetCode} is linked to another number. Please contact reception.`,
+      message: `Ticket "${identifier}" is linked to another number. Please contact reception.`,
     });
     return;
   }
@@ -167,7 +177,7 @@ async function handleRequestCommand({ from, identifier }) {
   if (linkedOwnerPhone && linkedOwnerPhone !== from) {
     await sendWhatsAppTextMessage({
       phone: from,
-      message: `Valet code ${valetCode} is linked to another number. Please contact reception.`,
+      message: `Ticket "${identifier}" is linked to another number. Please contact reception.`,
     });
     return;
   }
@@ -188,23 +198,80 @@ async function handleRequestCommand({ from, identifier }) {
     return;
   }
 
-  ticket.status = TICKET_STATUS.RETRIEVAL_REQUESTED;
-  if (!linkedOwnerPhone) {
-    ticket.ownerPhone = from;
+  if (ticket.sourceTicket) {
+    await sendWhatsAppTextMessage({
+      phone: from,
+      message: `Retrieval already in progress for ticket #${ticket.ticketNumber}.`,
+    });
+    return;
   }
-  await ticket.save();
+
+  const activeRetrievalTicket = await findActiveRetrievalTicketForSource(ticket._id);
+  if (activeRetrievalTicket) {
+    await sendWhatsAppTextMessage({
+      phone: from,
+      message: `Retrieval already in progress for ticket #${ticket.ticketNumber}.`,
+    });
+    return;
+  }
+
+  if (!linkedOwnerPhone) {
+    await Ticket.updateOne({ _id: ticket._id }, { $set: { ownerPhone: from } });
+  }
+
+  const retrievalTicket = await Ticket.create({
+    ticketNumber: generateTicketNumber(),
+    valetCode: generateValetCode("RTV"),
+    ownerType: ticket.ownerType,
+    ownerPhone: linkedOwnerPhone || from,
+    ownerName: ticket.ownerName || "",
+    ownerUser: ticket.ownerUser || null,
+    branch: ticket.branch,
+    vehicle: ticket.vehicle?._id || ticket.vehicle,
+    status: TICKET_STATUS.RETRIEVAL_REQUESTED,
+    assignedDriver: null,
+    sourceTicket: ticket._id,
+    entryMethod: ticket.entryMethod,
+    slot: ticket.slot || "",
+    garage: ticket.garage || "",
+    keyTag: ticket.keyTag || "",
+    parkedAt: ticket.parkedAt || null,
+    keyReceivedAt: ticket.keyReceivedAt || null,
+    keyReceivedBy: ticket.keyReceivedBy || null,
+    keyNote: ticket.keyNote || "",
+    receivingPoint: ticket.receivingPoint || "",
+    services: ticket.services || [],
+    notes: ticket.notes || "",
+    createdBy: null,
+  });
 
   await TicketEvent.create({
     ticket: ticket._id,
+    status: ticket.status,
+    actor: null,
+    note: "Retrieval request ticket created via WhatsApp",
+    meta: {
+      retrievalTicketId: String(retrievalTicket._id),
+      retrievalTicketNumber: retrievalTicket.ticketNumber,
+      from,
+    },
+  });
+
+  await TicketEvent.create({
+    ticket: retrievalTicket._id,
     status: TICKET_STATUS.RETRIEVAL_REQUESTED,
     actor: null,
-    note: "Retrieval requested by owner via WhatsApp",
-    meta: { from },
+    note: "Retrieval request created via WhatsApp",
+    meta: {
+      sourceTicketId: String(ticket._id),
+      sourceTicketNumber: ticket.ticketNumber,
+      from,
+    },
   });
 
   await sendWhatsAppTextMessage({
     phone: from,
-    message: `Retrieval requested for ticket #${ticket.ticketNumber}. Your driver is on the way.`,
+    message: `Retrieval requested for ticket #${ticket.ticketNumber}. We are assigning a driver now.`,
   });
 }
 

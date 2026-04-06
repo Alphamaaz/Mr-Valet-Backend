@@ -29,6 +29,11 @@ const ticketSchema = new mongoose.Schema(
       default: "",
       index: true,
     },
+    ownerName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     ownerUser: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -45,12 +50,7 @@ const ticketSchema = new mongoose.Schema(
       ref: "Vehicle",
       required: true,
     },
-    location: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Location",
-      default: null,
-      index: true,
-    },
+    
     status: {
       type: String,
       enum: Object.values(TICKET_STATUS),
@@ -60,6 +60,12 @@ const ticketSchema = new mongoose.Schema(
     assignedDriver: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
+      default: null,
+      index: true,
+    },
+    sourceTicket: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ticket",
       default: null,
       index: true,
     },

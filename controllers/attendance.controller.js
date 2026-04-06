@@ -140,7 +140,7 @@ async function getActiveBranchForUser(req) {
 }
 
 export async function generateAttendanceQrCode(req, res) {
-  const parsed = generateAttendanceQrCodeSchema.safeParse(req.body);
+  const parsed = generateAttendanceQrCodeSchema.safeParse(req.body || {});
   if (!parsed.success) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }
@@ -189,7 +189,7 @@ export async function generateAttendanceQrCode(req, res) {
 }
 
 export async function checkInAttendance(req, res) {
-  const parsed = attendancePayloadSchema.safeParse(req.body);
+  const parsed = attendancePayloadSchema.safeParse(req.body || {});
   if (!parsed.success) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }
@@ -263,7 +263,7 @@ export async function checkInAttendance(req, res) {
 }
 
 export async function checkOutAttendance(req, res) {
-  const parsed = attendancePayloadSchema.safeParse(req.body);
+  const parsed = attendancePayloadSchema.safeParse(req.body || {});
   if (!parsed.success) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }

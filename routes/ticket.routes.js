@@ -6,9 +6,13 @@ import {
   getDamageClaims,
   getKeyControllerQueue,
   getMyAssignedTickets,
+  getOwnerActiveTickets,
+  getOwnerTicketHistory,
   requestRetrieval,
   getTicketById,
+  linkOwnerToTicket,
   listTickets,
+  listRetrievalRequests,
   markKeyReceived,
   processEntryMethod,
   updateTicketStatus,
@@ -43,8 +47,32 @@ router.get(
 
 router.get(
   "/key-controller/queue",
-  requireRoles(ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
   asyncHandler(getKeyControllerQueue),
+);
+
+router.get(
+  "/retrieval-requests",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  asyncHandler(listRetrievalRequests),
+);
+
+router.post(
+  "/owner/link",
+  requireRoles(ROLES.OWNER),
+  asyncHandler(linkOwnerToTicket),
+);
+
+router.get(
+  "/owner/active",
+  requireRoles(ROLES.OWNER),
+  asyncHandler(getOwnerActiveTickets),
+);
+
+router.get(
+  "/owner/history",
+  requireRoles(ROLES.OWNER),
+  asyncHandler(getOwnerTicketHistory),
 );
 
 router.get(
