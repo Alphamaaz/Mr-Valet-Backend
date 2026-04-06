@@ -49,6 +49,7 @@ function safeUserResponse(user) {
     role: user.role,
     fullName: user.fullName,
     branchId: user.branch ? String(user.branch) : null,
+    attendanceStatus: user.attendanceStatus || "CHECKED_OUT",
   };
 }
 
@@ -184,6 +185,6 @@ export async function getMe(req, res) {
   }
 
   return res.json(
-    new ApiResponse(200, safeUserResponse(user), "Profile retrieved successfully"),
+    new ApiResponse(200, safeUserResponse(user), "Profile retrieved successfully TEST"),
   );
 }
