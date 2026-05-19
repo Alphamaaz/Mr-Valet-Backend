@@ -2,6 +2,8 @@ import mongoose from "mongoose";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS } from "../constants/ticketStatus.js";
 import { ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
+import { PAYMENT_CONDITION_VALUES, PAYMENT_CONDITIONS } from "../constants/paymentConditions.js";
+import { PAYMENT_STATUS_VALUES, PAYMENT_STATUS } from "../constants/paymentStatus.js";
 
 const ticketSchema = new mongoose.Schema(
   {
@@ -63,6 +65,18 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    parkingDriver: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    deliveryDriver: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
     sourceTicket: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ticket",
@@ -73,6 +87,18 @@ const ticketSchema = new mongoose.Schema(
       type: String,
       enum: ENTRY_METHOD_VALUES,
       default: undefined,
+      index: true,
+    },
+    serviceType: {
+      type: String,
+      trim: true,
+      default: "NORMAL_VALET",
+      index: true,
+    },
+    paymentCondition: {
+      type: String,
+      enum: PAYMENT_CONDITION_VALUES,
+      default: PAYMENT_CONDITIONS.PAY_LATER,
       index: true,
     },
     slot: {
@@ -103,6 +129,23 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    keyReleasedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    keyReleasedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    keyReleasedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
     keyNote: {
       type: String,
       default: "",
@@ -114,6 +157,52 @@ const ticketSchema = new mongoose.Schema(
     services: {
       type: [String],
       default: [],
+    },
+    retrieval: {
+      requestedAt: {
+        type: Date,
+        default: null,
+      },
+      requestedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      requestedByRole: {
+        type: String,
+        default: "",
+      },
+      assignedAt: {
+        type: Date,
+        default: null,
+      },
+      assignedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      keyReleasedAt: {
+        type: Date,
+        default: null,
+      },
+      keyReleasedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      keyReleasedTo: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      arrivedAt: {
+        type: Date,
+        default: null,
+      },
+      deliveredAt: {
+        type: Date,
+        default: null,
+      },
     },
     notes: {
       type: String,
@@ -130,12 +219,71 @@ const ticketSchema = new mongoose.Schema(
       },
       status: {
         type: String,
-        enum: ["PENDING", "PAID", "FAILED", "REFUNDED"],
-        default: "PENDING",
+        enum: PAYMENT_STATUS_VALUES,
+        default: PAYMENT_STATUS.UNPAID,
+      },
+      currency: {
+        type: String,
+        default: "QAR",
       },
       receiptLink: {
         type: String,
         default: "",
+      },
+      pos: {
+        terminalId: {
+          type: String,
+          default: "",
+        },
+        bankTransactionRef: {
+          type: String,
+          default: "",
+        },
+        confirmationStatus: {
+          type: String,
+          default: "",
+        },
+        confirmedAt: {
+          type: Date,
+          default: null,
+        },
+      },
+      online: {
+        provider: {
+          type: String,
+          default: "",
+        },
+        paymentReference: {
+          type: String,
+          default: "",
+        },
+        paidAt: {
+          type: Date,
+          default: null,
+        },
+      },
+    },
+    approvals: {
+      freeOfCharge: {
+        requestedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null,
+        },
+        approvedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null,
+        },
+        status: {
+          type: String,
+          enum: ["NOT_REQUIRED", "PENDING", "APPROVED", "REJECTED"],
+          default: "NOT_REQUIRED",
+        },
+        reason: {
+          type: String,
+          default: "",
+        },
       },
     },
     createdBy: {

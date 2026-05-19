@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import QRCode from "qrcode";
@@ -7,11 +6,11 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { Attendance } from "../models/Attendance.js";
 import { Branch } from "../models/Branch.js";
 import { User } from "../models/User.js";
-import { ROLES } from "../constants/roles.js";
 
 const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Karachi";
 const MAX_LOCATION_ACCURACY_METERS = Number(process.env.MAX_LOCATION_ACCURACY_METERS || 50);
 const MAX_LOCATION_AGE_SECONDS = Number(process.env.MAX_LOCATION_AGE_SECONDS || 15);
+const DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS = Number(process.env.ATTENDANCE_QR_EXPIRY_SECONDS || 30);
 
 const attendancePayloadSchema = z.object({
   qrToken: z.string().trim().min(10),
@@ -22,9 +21,8 @@ const attendancePayloadSchema = z.object({
   deviceInfo: z.record(z.string(), z.any()).optional(),
 });
 
-const generateAttendanceQrCodeSchema = z.object({
+const dynamicAttendanceQrCodeParamsSchema = z.object({
   branchId: z.string().trim().min(1),
-  expiresInSeconds: z.coerce.number().int().min(60).max(315360000).optional(),
 });
 
 function getAttendanceQrSecret() {
@@ -78,6 +76,20 @@ function verifyAttendanceQrToken(qrToken, branchId) {
   }
 }
 
+function buildAttendanceQrToken({ branch, issuedFor, expiresInSeconds }) {
+  return jwt.sign(
+    {
+      purpose: "ATTENDANCE",
+      branchId: String(branch._id),
+      branchCode: branch.code,
+      jti: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      issuedFor,
+    },
+    getAttendanceQrSecret(),
+    { expiresIn: expiresInSeconds },
+  );
+}
+
 function validateLocationFreshness(capturedAt) {
   if (!capturedAt) {
     return;
@@ -105,23 +117,6 @@ function validateLocationAccuracy(accuracyMeters) {
   }
 }
 
-async function resolveBranchForQrGeneration(req, branchId) {
-  if (req.user.role !== ROLES.SUPER_ADMIN) {
-    throw forbidden("Only super admin can generate attendance QR code");
-  }
-
-  const branch = await Branch.findOne({
-    _id: branchId,
-    isActive: true,
-  }).lean();
-
-  if (!branch) {
-    throw badRequest("Branch is invalid or inactive");
-  }
-
-  return branch;
-}
-
 async function getActiveBranchForUser(req) {
   if (!req.user?.branchId) {
     throw forbidden("User is not assigned to a branch");
@@ -139,62 +134,7 @@ async function getActiveBranchForUser(req) {
   return branch;
 }
 
-export async function generateAttendanceQrCode(req, res) {
-  const parsed = generateAttendanceQrCodeSchema.safeParse(req.body || {});
-  if (!parsed.success) {
-    throw badRequest("Invalid request payload", parsed.error.flatten());
-  }
-
-  const branch = await resolveBranchForQrGeneration(req, parsed.data.branchId);
-
-  const signOptions = {};
-  if (parsed.data.expiresInSeconds !== undefined) {
-    signOptions.expiresIn = parsed.data.expiresInSeconds;
-  }
-
-  const qrToken = jwt.sign(
-    {
-      purpose: "ATTENDANCE",
-      branchId: String(branch._id),
-      jti: crypto.randomUUID(),
-      issuedFor: "PRINTED_QR",
-    },
-    getAttendanceQrSecret(),
-    signOptions,
-  );
-
-  const qrImageDataUrl = await QRCode.toDataURL(qrToken, {
-    errorCorrectionLevel: "M",
-    margin: 2,
-    width: 512,
-  });
-
-  return res.status(201).json(
-    new ApiResponse(
-      201,
-      {
-        branch: {
-          id: String(branch._id),
-          name: branch.name,
-          code: branch.code,
-          address: branch.address,
-        },
-        qrToken,
-        qrImageDataUrl,
-        expiresInSeconds: parsed.data.expiresInSeconds ?? null,
-      },
-      "Attendance QR code generated successfully",
-    ),
-  );
-}
-
-export async function checkInAttendance(req, res) {
-  const parsed = attendancePayloadSchema.safeParse(req.body || {});
-  if (!parsed.success) {
-    throw badRequest("Invalid request payload", parsed.error.flatten());
-  }
-
-  const payload = parsed.data;
+async function validateAttendanceScan(req, payload) {
   validateLocationFreshness(payload.capturedAt);
   validateLocationAccuracy(payload.accuracyMeters);
 
@@ -213,23 +153,119 @@ export async function checkInAttendance(req, res) {
     );
   }
 
+  return {
+    branch,
+    distanceMeters,
+  };
+}
+
+export async function getDynamicAttendanceQrCode(req, res) {
+  const parsed = dynamicAttendanceQrCodeParamsSchema.safeParse(req.params || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid request parameters", parsed.error.flatten());
+  }
+
+  const branch = await Branch.findOne({
+    _id: parsed.data.branchId,
+    isActive: true,
+  }).lean();
+
+  if (!branch) {
+    throw badRequest("Branch is invalid or inactive");
+  }
+
+  const expiresInSeconds = Number.isFinite(DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS)
+    && DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS > 0
+    ? DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS
+    : 30;
+
+  const qrToken = buildAttendanceQrToken({
+    branch,
+    issuedFor: "DYNAMIC_LOCATION_QR",
+    expiresInSeconds,
+  });
+
+  const qrImageDataUrl = await QRCode.toDataURL(qrToken, {
+    errorCorrectionLevel: "M",
+    margin: 2,
+    width: 512,
+  });
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + expiresInSeconds * 1000);
+
+  return res.json(
+    new ApiResponse(
+      200,
+      {
+        branch: {
+          id: String(branch._id),
+          name: branch.name,
+          code: branch.code,
+          address: branch.address,
+        },
+        qrToken,
+        qrImageDataUrl,
+        issuedAt: now,
+        expiresAt,
+        expiresInSeconds,
+        refreshAfterSeconds: Math.max(expiresInSeconds - 3, 1),
+      },
+      "Dynamic attendance QR generated successfully",
+    ),
+  );
+}
+
+export async function scanAttendance(req, res) {
+  const parsed = attendancePayloadSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const payload = parsed.data;
+  const { branch, distanceMeters } = await validateAttendanceScan(req, payload);
   const dateKey = getDateKey(new Date());
-  const existingAttendance = await Attendance.findOne({
+
+  const activeAttendance = await Attendance.findOne({
+    user: req.user.id,
+    status: "ACTIVE",
+  });
+
+  if (activeAttendance) {
+    activeAttendance.checkOutTime = new Date();
+    activeAttendance.checkOutLatitude = payload.latitude;
+    activeAttendance.checkOutLongitude = payload.longitude;
+    activeAttendance.checkOutAccuracyMeters = payload.accuracyMeters ?? null;
+    activeAttendance.checkOutDistanceMeters = distanceMeters;
+    activeAttendance.status = "COMPLETED";
+
+    await activeAttendance.save();
+    await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_OUT" });
+
+    return res.json(
+      new ApiResponse(
+        200,
+        {
+          action: "CHECK_OUT",
+          attendanceId: String(activeAttendance._id),
+          status: activeAttendance.status,
+          checkOutTime: activeAttendance.checkOutTime,
+          branchId: String(branch._id),
+        },
+        "Check-out marked successfully",
+      ),
+    );
+  }
+
+  const todayAttendance = await Attendance.findOne({
     user: req.user.id,
     dateKey,
   }).lean();
 
-  if (existingAttendance) {
-    if (existingAttendance.status === "ACTIVE") {
-      throw new AppError(
-        "Attendance already checked in. Use check-out endpoint when leaving.",
-        { statusCode: 409, code: "ALREADY_CHECKED_IN", expose: true },
-      );
-    }
-
+  if (todayAttendance) {
     throw new AppError(
-      "Attendance already marked for today. Duplicate check-in is not allowed.",
-      { statusCode: 409, code: "ATTENDANCE_ALREADY_MARKED_TODAY", expose: true },
+      "Attendance already checked out for today. Duplicate check-in is not allowed.",
+      { statusCode: 409, code: "ATTENDANCE_ALREADY_COMPLETED_TODAY", expose: true },
     );
   }
 
@@ -252,72 +288,13 @@ export async function checkInAttendance(req, res) {
     new ApiResponse(
       201,
       {
+        action: "CHECK_IN",
         attendanceId: String(attendance._id),
         status: attendance.status,
         checkInTime: attendance.checkInTime,
         branchId: String(branch._id),
       },
       "Check-in marked successfully",
-    ),
-  );
-}
-
-export async function checkOutAttendance(req, res) {
-  const parsed = attendancePayloadSchema.safeParse(req.body || {});
-  if (!parsed.success) {
-    throw badRequest("Invalid request payload", parsed.error.flatten());
-  }
-
-  const payload = parsed.data;
-  validateLocationFreshness(payload.capturedAt);
-  validateLocationAccuracy(payload.accuracyMeters);
-
-  const branch = await getActiveBranchForUser(req);
-  verifyAttendanceQrToken(payload.qrToken, branch._id);
-
-  const distanceMeters = getDistanceMeters(
-    { latitude: branch.latitude, longitude: branch.longitude },
-    { latitude: payload.latitude, longitude: payload.longitude },
-  );
-
-  if (distanceMeters > branch.allowedRadiusMeters) {
-    throw new AppError(
-      `You are outside your work location by ${distanceMeters - branch.allowedRadiusMeters}m. Move closer and retry.`,
-      { statusCode: 403, code: "OUTSIDE_WORK_LOCATION", expose: true },
-    );
-  }
-
-  const activeAttendance = await Attendance.findOne({
-    user: req.user.id,
-    status: "ACTIVE",
-  });
-
-  if (!activeAttendance) {
-    throw new AppError(
-      "No active check-in found. Please check in first.",
-      { statusCode: 409, code: "NOT_CHECKED_IN", expose: true },
-    );
-  }
-
-  activeAttendance.checkOutTime = new Date();
-  activeAttendance.checkOutLatitude = payload.latitude;
-  activeAttendance.checkOutLongitude = payload.longitude;
-  activeAttendance.checkOutAccuracyMeters = payload.accuracyMeters ?? null;
-  activeAttendance.checkOutDistanceMeters = distanceMeters;
-  activeAttendance.status = "COMPLETED";
-
-  await activeAttendance.save();
-  await User.findByIdAndUpdate(req.user.id, { attendanceStatus: "CHECKED_OUT" });
-
-  return res.json(
-    new ApiResponse(
-      200,
-      {
-        attendanceId: String(activeAttendance._id),
-        status: activeAttendance.status,
-        checkOutTime: activeAttendance.checkOutTime,
-      },
-      "Check-out marked successfully",
     ),
   );
 }

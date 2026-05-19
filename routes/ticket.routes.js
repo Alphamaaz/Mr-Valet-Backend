@@ -7,13 +7,14 @@ import {
   getKeyControllerQueue,
   getMyAssignedTickets,
   getOwnerActiveTickets,
-  getOwnerTicketHistory,
+  getTicketHistory,
   requestRetrieval,
   getTicketById,
   linkOwnerToTicket,
   listTickets,
   listRetrievalRequests,
   markKeyReceived,
+  releaseKey,
   processEntryMethod,
   updateTicketStatus,
   parkCar,
@@ -35,6 +36,7 @@ router.get(
     ROLES.DRIVER,
     ROLES.KEY_CONTROLLER,
     ROLES.SUPERVISOR,
+    ROLES.OPERATIONS_MANAGER,
   ),
   asyncHandler(listTickets),
 );
@@ -47,13 +49,13 @@ router.get(
 
 router.get(
   "/key-controller/queue",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(getKeyControllerQueue),
 );
 
 router.get(
   "/retrieval-requests",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(listRetrievalRequests),
 );
 
@@ -70,9 +72,16 @@ router.get(
 );
 
 router.get(
-  "/owner/history",
-  requireRoles(ROLES.OWNER),
-  asyncHandler(getOwnerTicketHistory),
+  "/history",
+  requireRoles(
+    ROLES.RECEPTIONIST,
+    ROLES.DRIVER,
+    ROLES.KEY_CONTROLLER,
+    ROLES.SUPERVISOR,
+    ROLES.OPERATIONS_MANAGER,
+    ROLES.OWNER,
+  ),
+  asyncHandler(getTicketHistory),
 );
 
 router.get(
@@ -82,25 +91,26 @@ router.get(
     ROLES.DRIVER,
     ROLES.KEY_CONTROLLER,
     ROLES.SUPERVISOR,
+    ROLES.OPERATIONS_MANAGER,
   ),
   asyncHandler(getTicketById),
 );
 
 router.post(
   "/manual/car-arrival",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(createManualCarArrival),
 );
 
 router.patch(
   "/:ticketId/assign-driver",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(assignDriver),
 );
 
 router.patch(
   "/:ticketId/process-entry-method",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(processEntryMethod),
 );
 
@@ -111,20 +121,27 @@ router.patch(
     ROLES.DRIVER,
     ROLES.KEY_CONTROLLER,
     ROLES.SUPERVISOR,
+    ROLES.OPERATIONS_MANAGER,
   ),
   asyncHandler(updateTicketStatus),
 );
 
 router.post(
   "/:ticketId/retrieval-request",
-  requireRoles(ROLES.OWNER, ROLES.RECEPTIONIST),
+  requireRoles(ROLES.OWNER, ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(requestRetrieval),
 );
 
 router.patch(
   "/:ticketId/key-received",
-  requireRoles(ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  requireRoles(ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(markKeyReceived),
+);
+
+router.patch(
+  "/:ticketId/key-release",
+  requireRoles(ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR),
+  asyncHandler(releaseKey),
 );
 
 router.post(
@@ -136,7 +153,7 @@ router.post(
 
 router.get(
   "/:ticketId/damage-claims",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(getDamageClaims),
 );
 

@@ -35,5 +35,7 @@ const ticketEventSchema = new mongoose.Schema(
   },
 );
 
-export const TicketEvent = mongoose.model("TicketEvent", ticketEventSchema);
+ticketEventSchema.index({ actor: 1, createdAt: -1 });
+ticketEventSchema.index({ ticket: 1, createdAt: -1 });
 
+export const TicketEvent = mongoose.model("TicketEvent", ticketEventSchema);

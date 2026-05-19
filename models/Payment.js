@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { PAYMENT_STATUS_VALUES, PAYMENT_STATUS } from "../constants/paymentStatus.js";
 
 const paymentSchema = new mongoose.Schema(
   {
@@ -15,14 +16,26 @@ const paymentSchema = new mongoose.Schema(
     },
     method: {
       type: String,
-      enum: ["CASH", "CARD", "ONLINE"],
+      enum: ["CASH", "CARD", "ONLINE", "POS", "VOUCHER", "CAMPAIGN", "MEMBERSHIP", "FREE_OF_CHARGE"],
       required: true,
     },
     status: {
       type: String,
-      enum: ["PENDING", "PAID", "FAILED", "REFUNDED"],
-      default: "PENDING",
+      enum: PAYMENT_STATUS_VALUES,
+      default: PAYMENT_STATUS.UNPAID,
       index: true,
+    },
+    terminalId: {
+      type: String,
+      default: "",
+    },
+    bankTransactionRef: {
+      type: String,
+      default: "",
+    },
+    providerReference: {
+      type: String,
+      default: "",
     },
     receiptLink: {
       type: String,
@@ -41,4 +54,3 @@ const paymentSchema = new mongoose.Schema(
 );
 
 export const Payment = mongoose.model("Payment", paymentSchema);
-

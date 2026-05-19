@@ -5,6 +5,7 @@ import { Branch } from "../models/Branch.js";
 import { User } from "../models/User.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
+import { PAYMENT_CONDITION_VALUES } from "../constants/paymentConditions.js";
 
 const createBranchSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -14,6 +15,19 @@ const createBranchSchema = z.object({
   longitude: z.number().min(-180).max(180),
   allowedRadiusMeters: z.number().min(10).max(1000).optional(),
   supportedEntryMethods: z.array(z.enum(ENTRY_METHOD_VALUES)).min(1).optional(),
+  defaultEntryMethod: z.enum(ENTRY_METHOD_VALUES).optional(),
+  serviceTypes: z.array(z.object({
+    code: z.string().trim().min(1).max(40),
+    name: z.string().trim().min(1).max(100),
+    basePrice: z.number().min(0).optional(),
+    isActive: z.boolean().optional(),
+  })).min(1).optional(),
+  allowedPaymentConditions: z.array(z.enum(PAYMENT_CONDITION_VALUES)).min(1).optional(),
+  dedicatedKeyController: z.string().trim().optional().nullable(),
+  keyReturnSlaSeconds: z.number().min(30).max(1800).optional(),
+  tax: z.object({
+    vatPercent: z.number().min(0).max(100).optional(),
+  }).optional(),
 });
 
 function toBranchResponse(branch) {
@@ -30,6 +44,12 @@ function toBranchResponse(branch) {
     longitude: branch.longitude,
     allowedRadiusMeters: branch.allowedRadiusMeters,
     supportedEntryMethods,
+    defaultEntryMethod: branch.defaultEntryMethod || null,
+    serviceTypes: branch.serviceTypes || [],
+    allowedPaymentConditions: branch.allowedPaymentConditions || [],
+    dedicatedKeyController: branch.dedicatedKeyController ? String(branch.dedicatedKeyController) : null,
+    keyReturnSlaSeconds: branch.keyReturnSlaSeconds,
+    tax: branch.tax || { vatPercent: 0 },
     isActive: branch.isActive,
     createdAt: branch.createdAt,
   };
@@ -52,6 +72,12 @@ export async function createBranch(req, res) {
 
   const payload = parsed.data;
   const code = payload.code.toUpperCase();
+  const serviceTypes = payload.serviceTypes?.map((service) => ({
+    ...service,
+    code: service.code.toUpperCase(),
+    basePrice: service.basePrice ?? 0,
+    isActive: service.isActive ?? true,
+  }));
 
   const existingBranch = await Branch.findOne({ code }).lean();
   if (existingBranch) {
@@ -66,6 +92,14 @@ export async function createBranch(req, res) {
     longitude: payload.longitude,
     allowedRadiusMeters: payload.allowedRadiusMeters ?? 120,
     supportedEntryMethods: payload.supportedEntryMethods || [...ENTRY_METHOD_VALUES],
+    defaultEntryMethod: payload.defaultEntryMethod,
+    serviceTypes,
+    allowedPaymentConditions: payload.allowedPaymentConditions,
+    dedicatedKeyController: payload.dedicatedKeyController && isValidObjectId(payload.dedicatedKeyController)
+      ? payload.dedicatedKeyController
+      : null,
+    keyReturnSlaSeconds: payload.keyReturnSlaSeconds ?? 90,
+    tax: payload.tax || { vatPercent: 0 },
   });
 
   // Bootstrap flow: creator without a branch becomes part of this new branch.
@@ -141,6 +175,23 @@ export async function updateBranch(req, res) {
   if (payload.longitude !== undefined) branch.longitude = payload.longitude;
   if (payload.allowedRadiusMeters !== undefined) branch.allowedRadiusMeters = payload.allowedRadiusMeters;
   if (payload.supportedEntryMethods !== undefined) branch.supportedEntryMethods = payload.supportedEntryMethods;
+  if (payload.defaultEntryMethod !== undefined) branch.defaultEntryMethod = payload.defaultEntryMethod;
+  if (payload.serviceTypes !== undefined) {
+    branch.serviceTypes = payload.serviceTypes.map((service) => ({
+      ...service,
+      code: service.code.toUpperCase(),
+      basePrice: service.basePrice ?? 0,
+      isActive: service.isActive ?? true,
+    }));
+  }
+  if (payload.allowedPaymentConditions !== undefined) branch.allowedPaymentConditions = payload.allowedPaymentConditions;
+  if (payload.dedicatedKeyController !== undefined) {
+    branch.dedicatedKeyController = payload.dedicatedKeyController && isValidObjectId(payload.dedicatedKeyController)
+      ? payload.dedicatedKeyController
+      : null;
+  }
+  if (payload.keyReturnSlaSeconds !== undefined) branch.keyReturnSlaSeconds = payload.keyReturnSlaSeconds;
+  if (payload.tax !== undefined) branch.tax = payload.tax;
 
   await branch.save();
 
