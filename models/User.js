@@ -47,11 +47,18 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    lastAssignedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: true,
     versionKey: false,
   },
 );
+
+userSchema.index({ branch: 1, role: 1, isActive: 1, attendanceStatus: 1, lastAssignedAt: 1 });
 
 export const User = mongoose.model("User", userSchema);

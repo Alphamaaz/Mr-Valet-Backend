@@ -15,7 +15,7 @@ import {
   listRetrievalRequests,
   markKeyReceived,
   releaseKey,
-  processEntryMethod,
+  recordTicketPayment,
   updateTicketStatus,
   parkCar,
 } from "../controllers/ticket.controller.js";
@@ -97,7 +97,7 @@ router.get(
 );
 
 router.post(
-  "/manual/car-arrival",
+  "/issue",
   requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(createManualCarArrival),
 );
@@ -109,9 +109,9 @@ router.patch(
 );
 
 router.patch(
-  "/:ticketId/process-entry-method",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
-  asyncHandler(processEntryMethod),
+  "/:ticketId/payment",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(recordTicketPayment),
 );
 
 router.patch(

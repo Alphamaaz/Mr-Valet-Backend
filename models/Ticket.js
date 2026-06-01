@@ -56,7 +56,7 @@ const ticketSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: Object.values(TICKET_STATUS),
-      default: TICKET_STATUS.CREATED,
+      default: TICKET_STATUS.READY_TO_BE_PARKED,
       index: true,
     },
     assignedDriver: {
@@ -298,5 +298,12 @@ const ticketSchema = new mongoose.Schema(
     versionKey: false,
   },
 );
+
+ticketSchema.index({ branch: 1, status: 1, createdAt: -1 });
+ticketSchema.index({ branch: 1, status: 1, updatedAt: -1 });
+ticketSchema.index({ branch: 1, assignedDriver: 1, status: 1 });
+ticketSchema.index({ branch: 1, parkingDriver: 1, status: 1 });
+ticketSchema.index({ branch: 1, deliveryDriver: 1, status: 1 });
+ticketSchema.index({ branch: 1, ownerPhone: 1, status: 1 });
 
 export const Ticket = mongoose.model("Ticket", ticketSchema);

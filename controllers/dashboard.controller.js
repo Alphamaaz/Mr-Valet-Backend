@@ -75,56 +75,56 @@ export async function getDashboardStats(req, res) {
     Ticket.countDocuments({ branch: branchId, createdAt: { $gte: todayStart, $lte: todayEnd } }),
     Ticket.countDocuments({
       branch: branchId,
-      status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.COMPLETED, TICKET_STATUS.PAID] },
+      status: { $in: [TICKET_STATUS.CLOSED] },
       updatedAt: { $gte: todayStart, $lte: todayEnd },
     }),
     Ticket.countDocuments({ branch: branchId, createdAt: { $gte: yStart, $lte: yEnd } }),
     Ticket.countDocuments({
       branch: branchId,
-      status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.COMPLETED, TICKET_STATUS.PAID] },
+      status: { $in: [TICKET_STATUS.CLOSED] },
       updatedAt: { $gte: yStart, $lte: yEnd },
     }),
   ]);
 
 
-  // Uses TicketEvent pairs: CREATED timestamp → DELIVERED timestamp per ticket
+  // Uses TicketEvent pairs: READY_TO_BE_PARKED timestamp -> CLOSED timestamp per ticket
   const todayTicketIds = await Ticket.find({
     branch: branchId,
-    status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.COMPLETED, TICKET_STATUS.PAID] },
+    status: { $in: [TICKET_STATUS.CLOSED] },
     updatedAt: { $gte: todayStart, $lte: todayEnd },
   }).distinct("_id");
 
-  // Get CREATED and DELIVERED events for today's completed tickets
+  // Get READY_TO_BE_PARKED and CLOSED events for today's closed tickets
   const waitEvents = await TicketEvent.aggregate([
-    { $match: { ticket: { $in: todayTicketIds }, status: { $in: [TICKET_STATUS.CREATED, TICKET_STATUS.DELIVERED] } } },
+    { $match: { ticket: { $in: todayTicketIds }, status: { $in: [TICKET_STATUS.READY_TO_BE_PARKED, TICKET_STATUS.CLOSED] } } },
     { $sort: { createdAt: 1 } },
     { $group: {
         _id: "$ticket",
-        createdAt:   { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.CREATED] }, "$createdAt", null] } },
-        deliveredAt: { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.DELIVERED] }, "$createdAt", null] } },
+        createdAt:   { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.READY_TO_BE_PARKED] }, "$createdAt", null] } },
+        closedAt: { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.CLOSED] }, "$createdAt", null] } },
     }},
-    { $match: { createdAt: { $ne: null }, deliveredAt: { $ne: null } } },
-    { $project: { waitSeconds: { $divide: [{ $subtract: ["$deliveredAt", "$createdAt"] }, 1000] } } },
+    { $match: { createdAt: { $ne: null }, closedAt: { $ne: null } } },
+    { $project: { waitSeconds: { $divide: [{ $subtract: ["$closedAt", "$createdAt"] }, 1000] } } },
     { $group: { _id: null, avgWaitSeconds: { $avg: "$waitSeconds" } } },
   ]);
 
   // Yesterday's avg wait for percent comparison
   const yTicketIds = await Ticket.find({
     branch: branchId,
-    status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.COMPLETED, TICKET_STATUS.PAID] },
+    status: { $in: [TICKET_STATUS.CLOSED] },
     updatedAt: { $gte: yStart, $lte: yEnd },
   }).distinct("_id");
 
   const yWaitEvents = await TicketEvent.aggregate([
-    { $match: { ticket: { $in: yTicketIds }, status: { $in: [TICKET_STATUS.CREATED, TICKET_STATUS.DELIVERED] } } },
+    { $match: { ticket: { $in: yTicketIds }, status: { $in: [TICKET_STATUS.READY_TO_BE_PARKED, TICKET_STATUS.CLOSED] } } },
     { $sort: { createdAt: 1 } },
     { $group: {
         _id: "$ticket",
-        createdAt:   { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.CREATED] }, "$createdAt", null] } },
-        deliveredAt: { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.DELIVERED] }, "$createdAt", null] } },
+        createdAt:   { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.READY_TO_BE_PARKED] }, "$createdAt", null] } },
+        closedAt: { $first: { $cond: [{ $eq: ["$status", TICKET_STATUS.CLOSED] }, "$createdAt", null] } },
     }},
-    { $match: { createdAt: { $ne: null }, deliveredAt: { $ne: null } } },
-    { $project: { waitSeconds: { $divide: [{ $subtract: ["$deliveredAt", "$createdAt"] }, 1000] } } },
+    { $match: { createdAt: { $ne: null }, closedAt: { $ne: null } } },
+    { $project: { waitSeconds: { $divide: [{ $subtract: ["$closedAt", "$createdAt"] }, 1000] } } },
     { $group: { _id: null, avgWaitSeconds: { $avg: "$waitSeconds" } } },
   ]);
 
@@ -166,3 +166,4 @@ export async function getDashboardStats(req, res) {
     ),
   );
 }
+

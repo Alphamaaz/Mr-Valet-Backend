@@ -6,6 +6,7 @@ import { EmployeeProfile } from "../models/EmployeeProfile.js";
 import { Ticket } from "../models/Ticket.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { STAFF_ROLES } from "../constants/roles.js";
+import { TICKET_STATUS } from "../constants/ticketStatus.js";
 import "../models/Location.js";
 
 const KEY_HANDOVER_SLA_MINUTES = Number(process.env.KEY_HANDOVER_SLA_MINUTES || 3);
@@ -100,6 +101,12 @@ function buildImageUrl(req, imagePath) {
     ? process.env.APP_BASE_URL.replace(/\/$/, "")
     : `${req.protocol}://${req.get("host")}`;
   return `${base}${imagePath}`;
+}
+
+function getTodayStart() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return start;
 }
 
 // ─── Validation Schemas ───────────────────────────────────────────────────────
@@ -213,49 +220,152 @@ export async function getEmployees(req, res) {
 
 // ─── GET /api/v1/employees/drivers/free ───────────────────────────────────────
 // Get all drivers who are CHECKED_IN but NOT assigned to an active task
-// (Active task = ASSIGNED, NOT_PARKED, ON_THE_WAY)
-// If ticket is PARKED, driver is free.
+// Active task = driver is currently parking or delivering a vehicle.
 
 export async function getFreeDrivers(req, res) {
-  // 1. Find tickets that are actively being worked on by drivers
-  const busyStatuses = ["ASSIGNED", "NOT_PARKED", "ON_THE_WAY"];
-  const activeTickets = await Ticket.find({
-    status: { $in: busyStatuses },
-    branch: req.user.branchId, // only for the current branch
-    assignedDriver: { $ne: null },
-  }).lean();
-
-  const busyDriverIds = activeTickets.map((t) => String(t.assignedDriver));
-  console.log(busyDriverIds);
-
-  // 2. Find drivers who are checked in and NOT in the busy list
-  const filter = {
-    role: "DRIVER",
-    isActive: true,
-    attendanceStatus: "CHECKED_IN",
-    _id: { $nin: busyDriverIds },
-  };
-
-  if (req.user?.branchId && isValidObjectId(req.user.branchId)) {
-    filter.branch = req.user.branchId;
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw badRequest("User is not assigned to a valid branch");
   }
 
-  const freeDrivers = await User.find(filter)
+  const includeBusy = String(req.query.includeBusy || "false").toLowerCase() === "true";
+  const branchId = new mongoose.Types.ObjectId(req.user.branchId);
 
-    .sort({ fullName: 1 })
-    .select("fullName phone profileImage attendanceStatus")
+  const busyStatuses = [
+    TICKET_STATUS.READY_TO_BE_PARKED,
+    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+    TICKET_STATUS.ON_THE_WAY,
+    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+  ];
+
+  const activeTickets = await Ticket.find({
+    status: { $in: busyStatuses },
+    branch: req.user.branchId,
+    $or: [
+      { assignedDriver: { $ne: null } },
+      { deliveryDriver: { $ne: null } },
+    ],
+  })
+    .select("ticketNumber status assignedDriver deliveryDriver createdAt")
     .lean();
 
-  const drivers = freeDrivers.map((u) => ({
-    id: String(u._id),
-    fullName: u.fullName,
-    phone: u.phone,
-    profileImageUrl: buildImageUrl(req, u.profileImage),
-    attendanceStatus: u.attendanceStatus,
-  }));
+  const activeByDriver = new Map();
+  for (const ticket of activeTickets) {
+    for (const field of ["assignedDriver", "deliveryDriver"]) {
+      if (!ticket[field]) continue;
+      const driverId = String(ticket[field]);
+      const current = activeByDriver.get(driverId) || [];
+      current.push({
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        status: ticket.status,
+        assignedRole: field === "deliveryDriver" ? "DELIVERY" : "PARKING",
+        assignedAt: ticket.createdAt,
+      });
+      activeByDriver.set(driverId, current);
+    }
+  }
+
+  const driversInBranch = await User.find({
+    role: "DRIVER",
+    isActive: true,
+    branch: req.user.branchId,
+  })
+    .sort({ lastAssignedAt: 1, fullName: 1 })
+    .select("fullName phone profileImage attendanceStatus lastAssignedAt")
+    .lean();
+
+  const driverObjectIds = driversInBranch.map((driver) => driver._id);
+  const completedByDriver = new Map();
+
+  if (driverObjectIds.length) {
+    const completedAgg = await Ticket.aggregate([
+      {
+        $match: {
+          branch: branchId,
+          status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.CLOSED] },
+          updatedAt: { $gte: getTodayStart() },
+          $or: [
+            { parkingDriver: { $in: driverObjectIds } },
+            { deliveryDriver: { $in: driverObjectIds } },
+          ],
+        },
+      },
+      {
+        $project: {
+          driverIds: {
+            $setUnion: [
+              { $cond: [{ $ne: ["$parkingDriver", null] }, ["$parkingDriver"], []] },
+              { $cond: [{ $ne: ["$deliveryDriver", null] }, ["$deliveryDriver"], []] },
+            ],
+          },
+        },
+      },
+      { $unwind: "$driverIds" },
+      { $group: { _id: "$driverIds", completedJobsToday: { $sum: 1 } } },
+    ]);
+
+    for (const item of completedAgg) {
+      completedByDriver.set(String(item._id), item.completedJobsToday);
+    }
+  }
+
+  let drivers = driversInBranch.map((driver) => {
+    const driverId = String(driver._id);
+    const currentTickets = activeByDriver.get(driverId) || [];
+    const activeJobs = currentTickets.length;
+    const isAvailable = driver.attendanceStatus === "CHECKED_IN" && activeJobs === 0;
+    const availability = isAvailable
+      ? "AVAILABLE"
+      : driver.attendanceStatus === "ON_BREAK"
+        ? "ON_BREAK"
+        : driver.attendanceStatus === "CHECKED_OUT"
+          ? "OFF_DUTY"
+          : "BUSY";
+
+    return {
+      id: driverId,
+      fullName: driver.fullName,
+      phone: driver.phone,
+      profileImageUrl: buildImageUrl(req, driver.profileImage),
+      attendanceStatus: driver.attendanceStatus,
+      availability,
+      activeJobs,
+      currentTickets,
+      completedJobsToday: completedByDriver.get(driverId) || 0,
+      lastAssignedAt: driver.lastAssignedAt || null,
+      recommended: false,
+    };
+  });
+
+  drivers = drivers
+    .filter((driver) => includeBusy || driver.availability === "AVAILABLE")
+    .sort((a, b) => {
+      const availabilityRank = (value) => (value === "AVAILABLE" ? 0 : value === "BUSY" ? 1 : 2);
+      const rankDiff = availabilityRank(a.availability) - availabilityRank(b.availability);
+      if (rankDiff !== 0) return rankDiff;
+      if (a.activeJobs !== b.activeJobs) return a.activeJobs - b.activeJobs;
+      if (a.completedJobsToday !== b.completedJobsToday) return a.completedJobsToday - b.completedJobsToday;
+      const aLast = a.lastAssignedAt ? new Date(a.lastAssignedAt).getTime() : 0;
+      const bLast = b.lastAssignedAt ? new Date(b.lastAssignedAt).getTime() : 0;
+      if (aLast !== bLast) return aLast - bLast;
+      return a.fullName.localeCompare(b.fullName);
+    });
+
+  const recommended = drivers.find((driver) => driver.availability === "AVAILABLE");
+  if (recommended) {
+    recommended.recommended = true;
+  }
 
   res.status(200).json(
-    new ApiResponse(200, { drivers }, "Free drivers fetched successfully"),
+    new ApiResponse(
+      200,
+      {
+        count: drivers.length,
+        includeBusy,
+        drivers,
+      },
+      includeBusy ? "Driver workload fetched successfully" : "Free drivers fetched successfully",
+    ),
   );
 }
 

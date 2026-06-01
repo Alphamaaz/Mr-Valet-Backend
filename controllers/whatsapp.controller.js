@@ -4,7 +4,6 @@ import { Vehicle } from "../models/Vehicle.js";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
 import { isValidWhatsAppSignature, sendWhatsAppTextMessage } from "../services/whatsapp.service.js";
-import { generateTicketNumber, generateValetCode } from "../utils/idGenerator.js";
 
 function normalizePhone(phone) {
   return String(phone || "").replace(/\D/g, "");
@@ -29,15 +28,6 @@ function normalizeIdentifier(input) {
     .trim()
     .replace(/\s+/g, " ")
     .toUpperCase();
-}
-
-async function findActiveRetrievalTicketForSource(sourceTicketId) {
-  return Ticket.findOne({
-    sourceTicket: sourceTicketId,
-    status: {
-      $in: [TICKET_STATUS.RETRIEVAL_REQUESTED, TICKET_STATUS.ON_THE_WAY],
-    },
-  }).sort({ createdAt: -1 });
 }
 
 function parseCommand(text) {
@@ -120,7 +110,7 @@ async function findWhatsAppTicketByIdentifier(identifier) {
   return Ticket.findOne({
     vehicle: { $in: vehicleIds },
     ownerType: OWNER_TYPES.WHATSAPP,
-    status: { $nin: [TICKET_STATUS.CANCELLED, TICKET_STATUS.COMPLETED] },
+    status: { $ne: TICKET_STATUS.CLOSED },
   })
     .sort({ updatedAt: -1, createdAt: -1 })
     .populate("assignedDriver", "fullName")
@@ -182,7 +172,12 @@ async function handleRequestCommand({ from, identifier }) {
     return;
   }
 
-  if (ticket.status === TICKET_STATUS.RETRIEVAL_REQUESTED || ticket.status === TICKET_STATUS.ON_THE_WAY) {
+  if ([
+    TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+    TICKET_STATUS.ON_THE_WAY,
+    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+  ].includes(ticket.status)) {
     await sendWhatsAppTextMessage({
       phone: from,
       message: `Retrieval already in progress for ticket #${ticket.ticketNumber}.`,
@@ -190,27 +185,10 @@ async function handleRequestCommand({ from, identifier }) {
     return;
   }
 
-  if (!canTransitionStatus(ticket.status, TICKET_STATUS.RETRIEVAL_REQUESTED)) {
+  if (!canTransitionStatus(ticket.status, TICKET_STATUS.REQUESTED_FOR_DELIVERY)) {
     await sendWhatsAppTextMessage({
       phone: from,
       message: `Cannot request retrieval while ticket is ${ticket.status}. Please contact reception.`,
-    });
-    return;
-  }
-
-  if (ticket.sourceTicket) {
-    await sendWhatsAppTextMessage({
-      phone: from,
-      message: `Retrieval already in progress for ticket #${ticket.ticketNumber}.`,
-    });
-    return;
-  }
-
-  const activeRetrievalTicket = await findActiveRetrievalTicketForSource(ticket._id);
-  if (activeRetrievalTicket) {
-    await sendWhatsAppTextMessage({
-      phone: from,
-      message: `Retrieval already in progress for ticket #${ticket.ticketNumber}.`,
     });
     return;
   }
@@ -219,52 +197,34 @@ async function handleRequestCommand({ from, identifier }) {
     await Ticket.updateOne({ _id: ticket._id }, { $set: { ownerPhone: from } });
   }
 
-  const retrievalTicket = await Ticket.create({
-    ticketNumber: generateTicketNumber(),
-    valetCode: generateValetCode("RTV"),
-    ownerType: ticket.ownerType,
-    ownerPhone: linkedOwnerPhone || from,
-    ownerName: ticket.ownerName || "",
-    ownerUser: ticket.ownerUser || null,
-    branch: ticket.branch,
-    vehicle: ticket.vehicle?._id || ticket.vehicle,
-    status: TICKET_STATUS.RETRIEVAL_REQUESTED,
-    assignedDriver: null,
-    sourceTicket: ticket._id,
-    entryMethod: ticket.entryMethod,
-    slot: ticket.slot || "",
-    garage: ticket.garage || "",
-    keyTag: ticket.keyTag || "",
-    parkedAt: ticket.parkedAt || null,
-    keyReceivedAt: ticket.keyReceivedAt || null,
-    keyReceivedBy: ticket.keyReceivedBy || null,
-    keyNote: ticket.keyNote || "",
-    receivingPoint: ticket.receivingPoint || "",
-    services: ticket.services || [],
-    notes: ticket.notes || "",
-    createdBy: null,
-  });
+  await Ticket.updateOne(
+    { _id: ticket._id },
+    {
+      $set: {
+        status: TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+        assignedDriver: null,
+        deliveryDriver: null,
+        ownerPhone: linkedOwnerPhone || from,
+        "retrieval.requestedAt": new Date(),
+        "retrieval.requestedBy": null,
+        "retrieval.requestedByRole": "WHATSAPP",
+        "retrieval.assignedAt": null,
+        "retrieval.assignedBy": null,
+        "retrieval.keyReleasedAt": null,
+        "retrieval.keyReleasedBy": null,
+        "retrieval.keyReleasedTo": null,
+        "retrieval.arrivedAt": null,
+        "retrieval.deliveredAt": null,
+      },
+    },
+  );
 
   await TicketEvent.create({
     ticket: ticket._id,
-    status: ticket.status,
-    actor: null,
-    note: "Retrieval request ticket created via WhatsApp",
-    meta: {
-      retrievalTicketId: String(retrievalTicket._id),
-      retrievalTicketNumber: retrievalTicket.ticketNumber,
-      from,
-    },
-  });
-
-  await TicketEvent.create({
-    ticket: retrievalTicket._id,
-    status: TICKET_STATUS.RETRIEVAL_REQUESTED,
+    status: TICKET_STATUS.REQUESTED_FOR_DELIVERY,
     actor: null,
     note: "Retrieval request created via WhatsApp",
     meta: {
-      sourceTicketId: String(ticket._id),
-      sourceTicketNumber: ticket.ticketNumber,
       from,
     },
   });

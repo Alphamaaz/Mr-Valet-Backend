@@ -71,15 +71,14 @@ Key controller rule:
 
 Target statuses:
 
-1. `NEW_TRANSACTION_CREATED`
-2. `READY_TO_BE_PARKED`
-3. `PARKED_IN`
-4. `REQUESTED_FOR_DELIVERY`
-5. `ASSIGNED_FOR_DELIVERY`
-6. `ON_THE_WAY`
-7. `ARRIVED_FOR_DELIVERY`
-8. `DELIVERED`
-9. `CLOSED`
+1. `READY_TO_BE_PARKED`
+2. `PARKED_IN`
+3. `REQUESTED_FOR_DELIVERY`
+4. `ASSIGNED_FOR_DELIVERY`
+5. `ON_THE_WAY`
+6. `ARRIVED_FOR_DELIVERY`
+7. `DELIVERED`
+8. `CLOSED`
 
 Payment status is separate from car status.
 
@@ -90,6 +89,7 @@ Payment statuses:
 - `PREPAID`
 - `CAMPAIGN`
 - `MEMBERSHIP`
+- `FREE_OF_CHARGE`
 
 Closure rule:
 
@@ -109,7 +109,7 @@ Frontend flow:
 5. Receptionist selects/uses the branch ticket method.
 6. Entry method succeeds.
 7. Backend creates the transaction and issues ticket.
-8. Status becomes `READY_TO_BE_PARKED` if driver is assigned, otherwise `NEW_TRANSACTION_CREATED`.
+8. Status becomes `READY_TO_BE_PARKED` whether a driver is assigned or still pending assignment.
 
 Backend must not create the final transaction before entry method success.
 
@@ -162,6 +162,15 @@ Parking steps:
 5. Driver must return key within 90 seconds.
 6. If timer expires, notify Key Controller, Receptionist, Supervisor.
 
+Driver assignment rules:
+
+- Assignment remains manual for operational control.
+- Backend must show driver workload and recommend the fairest available driver.
+- A driver is available only when checked in, not on break, active, same branch, and not handling an active ticket.
+- Busy statuses are `READY_TO_BE_PARKED`, `ASSIGNED_FOR_DELIVERY`, `ON_THE_WAY`, and `ARRIVED_FOR_DELIVERY`.
+- Manual assignment should reject busy/off-duty/on-break drivers unless the request explicitly uses `force=true`.
+- Fair sorting should prefer available drivers with fewer active jobs, fewer completed jobs today, and oldest `lastAssignedAt`.
+
 ## Retrieval And Delivery Flow
 
 Retrieval can be requested by:
@@ -189,12 +198,19 @@ Retrieval must stay on the same transaction/ticket. Do not create a second main 
 Payment condition is selected at transaction creation:
 
 - `PREPAID_VOUCHER`: Voucher/coupon verified before ticket creation.
-- `PAY_NOW`: Cash or POS at creation.
+- `PAY_NOW`: Cash/card/POS at creation. MVP supports manual cash/card/POS recording; SADAD/online gateway integration will reuse payment provider/reference fields later.
 - `PAY_LATER`: Payment at retrieval/delivery.
 - `CAMPAIGN`: Promotional discount/third-party settlement.
 - `MEMBERSHIP`: Membership card/ID/QR/NFC validated.
 - `VALIDATION`: Third party pays on guest behalf.
 - `FREE_OF_CHARGE`: Requires Supervisor or Operations Manager approval and reason.
+
+Client-confirmed PAY_LATER rule:
+
+- When owner sends a retrieval request for a `PAY_LATER` unpaid ticket, frontend must ask/show payment options.
+- At vehicle delivery, Receptionist asks/checks payment again.
+- Vehicle delivery can proceed operationally, but the ticket must not be marked complete/closed until payment is resolved.
+- Backend exposes payment requirement metadata on retrieval/status responses and blocks `CLOSED` unless payment is resolved.
 
 POS card flow:
 
@@ -319,13 +335,14 @@ The system must be written with high optimization standards because expected pro
 
 ## Next Backend Priorities
 
-1. Make final ticket creation require `serviceType`, `paymentCondition`, `entryMethod`, and successful entry-method result.
-2. Add payment processing endpoints and close-ticket rules.
-3. Add POS/payment metadata and reconciliation.
-4. Add voucher/campaign/membership validation.
-5. Add incident approval workflow.
-6. Add dynamic attendance QR with 30-second rotation and 18-hour session enforcement.
-7. Add key-return timer alert job.
-8. Add branch-level ticket method restrictions.
-9. Add FCM/push notification service.
-10. Add reporting endpoints.
+1. Final ticket issuance now requires `entryMethod`; driver assignment remains optional and can happen later.
+2. Public flow should use single-step ticket issuance instead of create-then-process-entry-method.
+3. Add payment processing endpoints and close-ticket rules.
+4. Add POS/payment metadata and reconciliation.
+5. Add voucher/campaign/membership validation.
+6. Add incident approval workflow.
+7. Add dynamic attendance QR with 30-second rotation and 18-hour session enforcement.
+8. Add key-return timer alert job.
+9. Add branch-level ticket method restrictions.
+10. Add FCM/push notification service.
+11. Add reporting endpoints.

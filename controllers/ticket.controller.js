@@ -4,6 +4,7 @@ import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js
 import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
 import { DamageReport } from "../models/DamageReport.js";
+import { Payment } from "../models/Payment.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { User } from "../models/User.js";
 import { Branch } from "../models/Branch.js";
@@ -12,9 +13,31 @@ import { ROLES } from "../constants/roles.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
 import { ENTRY_METHODS, ENTRY_METHOD_VALUES } from "../constants/entryMethods.js";
 import { PAYMENT_CONDITIONS, PAYMENT_CONDITION_VALUES } from "../constants/paymentConditions.js";
+import { PAYMENT_STATUS, PAYMENT_STATUS_VALUES } from "../constants/paymentStatus.js";
 import { generateTicketNumber, generateValetCode } from "../utils/idGenerator.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { sendTextSms } from "../services/twilio.service.js";
+
+const PAYMENT_METHOD_VALUES = Object.freeze([
+  "CASH",
+  "CARD",
+  "ONLINE",
+  "POS",
+  "VOUCHER",
+  "CAMPAIGN",
+  "MEMBERSHIP",
+  "FREE_OF_CHARGE",
+]);
+
+const immediatePaymentSchema = z.object({
+  amount: z.coerce.number().min(0),
+  method: z.enum(["CASH", "CARD", "POS"]),
+  currency: z.string().trim().min(3).max(3).default("QAR"),
+  receiptLink: z.string().trim().max(500).optional(),
+  terminalId: z.string().trim().max(80).optional(),
+  bankTransactionRef: z.string().trim().max(120).optional(),
+  notes: z.string().trim().max(300).optional(),
+}).optional();
 
 const createTicketSchema = z.object({
   ownerType: z.enum(Object.values(OWNER_TYPES)),
@@ -37,7 +60,7 @@ const manualCarArrivalSchema = z.object({
   ownerName: z.string().trim().min(1).max(80).optional(),
   serviceType: z.string().trim().min(1).max(60).optional(),
   paymentCondition: z.enum(PAYMENT_CONDITION_VALUES).optional(),
-  entryMethod: z.enum(ENTRY_METHOD_VALUES).optional(),
+  entryMethod: z.enum(ENTRY_METHOD_VALUES),
   driverId: z.string().trim().optional(),
   vehicle: z.object({
     plate: z.string().trim().min(2).max(20),
@@ -52,6 +75,7 @@ const manualCarArrivalSchema = z.object({
   keyNote: z.string().trim().max(300).optional(),
   receivingPoint: z.string().trim().max(80).optional(),
   services: z.array(z.string().trim().min(1).max(80)).optional(),
+  payment: immediatePaymentSchema,
   notes: z.string().trim().max(500).optional(),
 }).superRefine((data, ctx) => {
   if (data.entryMethod === ENTRY_METHODS.SMS && !data.ownerPhone) {
@@ -61,10 +85,19 @@ const manualCarArrivalSchema = z.object({
       message: "ownerPhone is required when entryMethod is SMS",
     });
   }
+
+  if (data.paymentCondition === PAYMENT_CONDITIONS.PAY_NOW && !data.payment) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["payment"],
+      message: "payment is required when paymentCondition is PAY_NOW",
+    });
+  }
 });
 
 const assignDriverSchema = z.object({
   driverId: z.string().trim().min(1),
+  force: z.boolean().default(false),
   vehicle: z.object({
     plate: z.string().trim().min(2).max(20).optional(),
     make: z.string().trim().min(1).max(60).optional(),
@@ -110,6 +143,48 @@ const releaseKeySchema = z.object({
   notes: z.string().trim().max(300).optional(),
 });
 
+const recordTicketPaymentSchema = z.object({
+  amount: z.coerce.number().min(0).optional(),
+  method: z.enum(PAYMENT_METHOD_VALUES),
+  status: z.enum(PAYMENT_STATUS_VALUES),
+  currency: z.string().trim().min(3).max(3).default("QAR"),
+  receiptLink: z.string().trim().max(500).optional(),
+  terminalId: z.string().trim().max(80).optional(),
+  bankTransactionRef: z.string().trim().max(120).optional(),
+  providerReference: z.string().trim().max(120).optional(),
+  pos: z.object({
+    terminalId: z.string().trim().max(80).optional(),
+    bankTransactionRef: z.string().trim().max(120).optional(),
+    confirmationStatus: z.string().trim().max(80).optional(),
+    confirmedAt: z.coerce.date().optional(),
+  }).optional(),
+  online: z.object({
+    provider: z.string().trim().max(80).optional(),
+    paymentReference: z.string().trim().max(120).optional(),
+    paidAt: z.coerce.date().optional(),
+  }).optional(),
+  notes: z.string().trim().max(300).optional(),
+}).superRefine((data, ctx) => {
+  const resolvedWithoutCash = [
+    PAYMENT_STATUS.PREPAID,
+    PAYMENT_STATUS.CAMPAIGN,
+    PAYMENT_STATUS.MEMBERSHIP,
+    PAYMENT_STATUS.FREE_OF_CHARGE,
+  ];
+
+  if (data.status === PAYMENT_STATUS.PAID && data.amount === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["amount"],
+      message: "amount is required when status is PAID",
+    });
+  }
+
+  if (resolvedWithoutCash.includes(data.status) && data.amount === undefined) {
+    data.amount = 0;
+  }
+});
+
 const keyControllerQueueQuerySchema = z.object({
   status: z.enum([
     TICKET_STATUS.READY_TO_BE_PARKED,
@@ -118,14 +193,11 @@ const keyControllerQueueQuerySchema = z.object({
     TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
     TICKET_STATUS.ON_THE_WAY,
     TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-    TICKET_STATUS.ASSIGNED,
-    TICKET_STATUS.NOT_PARKED,
-    TICKET_STATUS.PARKED,
-    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.DELIVERED,
   ]).optional(),
   keyStatus: z.enum(["KEY_PENDING", "KEY_RECEIVED"]).optional(),
   keyReleaseStatus: z.enum(["KEY_RELEASE_PENDING", "KEY_RELEASED", "NOT_APPLICABLE"]).optional(),
-  parkState: z.enum(["ALL", "PARKED", "NOT_PARKED"]).default("ALL"),
+  parkState: z.enum(["ALL", "PARKED_IN", "NOT_PARKED_IN"]).default("ALL"),
   q: z.string().trim().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -134,13 +206,9 @@ const retrievalRequestsQuerySchema = z.object({
   status: z.enum([
     TICKET_STATUS.REQUESTED_FOR_DELIVERY,
     TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.RETRIEVAL_REQUESTED,
     TICKET_STATUS.ON_THE_WAY,
     TICKET_STATUS.ARRIVED_FOR_DELIVERY,
     TICKET_STATUS.DELIVERED,
-    TICKET_STATUS.CANCELLED,
-    TICKET_STATUS.COMPLETED,
-    TICKET_STATUS.PAID,
   ]).optional(),
   q: z.string().trim().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -185,11 +253,7 @@ const KEY_HANDOVER_SLA_SECONDS = Number(
   process.env.KEY_HANDOVER_SLA_SECONDS || Number(process.env.KEY_HANDOVER_SLA_MINUTES || 0) * 60 || 90,
 );
 const OWNER_TERMINAL_STATUSES = [
-  TICKET_STATUS.DELIVERED,
   TICKET_STATUS.CLOSED,
-  TICKET_STATUS.PAID,
-  TICKET_STATUS.COMPLETED,
-  TICKET_STATUS.CANCELLED,
 ];
 
 const processEntryMethodSchema = z.object({
@@ -297,6 +361,40 @@ function matchesTicketSearch(ticket, queryText) {
 }
 
 function buildTicketSummary(ticket) {
+  const keyControl = buildKeyControlMeta(ticket);
+  const activeDriver = ticket.deliveryDriver || ticket.assignedDriver || null;
+  const compactDriver = activeDriver
+    ? {
+      id: String(activeDriver._id || activeDriver),
+      fullName: activeDriver.fullName || "",
+      phone: activeDriver.phone || "",
+      role: activeDriver.role || "",
+    }
+    : null;
+  const compactCreatedBy = ticket.createdBy
+    ? {
+      id: String(ticket.createdBy._id || ticket.createdBy),
+      fullName: ticket.createdBy.fullName || "",
+      role: ticket.createdBy.role || "",
+    }
+    : null;
+  const compactPaymentRequirement = buildPaymentRequirement(ticket);
+  const compactKeyControl = {
+    keyStatus: keyControl.keyStatus,
+    keyReleaseStatus: keyControl.keyReleaseStatus,
+    isDelayed: keyControl.isDelayed,
+    delaySeconds: keyControl.delaySeconds,
+  };
+  const retrieval = ticket.retrieval?.requestedAt
+    ? {
+      requestedAt: ticket.retrieval.requestedAt,
+      requestedByRole: ticket.retrieval.requestedByRole || "",
+      assignedAt: ticket.retrieval.assignedAt || null,
+      arrivedAt: ticket.retrieval.arrivedAt || null,
+      deliveredAt: ticket.retrieval.deliveredAt || null,
+    }
+    : null;
+
   return {
     id: String(ticket._id),
     ticketNumber: ticket.ticketNumber,
@@ -304,27 +402,43 @@ function buildTicketSummary(ticket) {
     status: ticket.status,
     serviceType: ticket.serviceType || "",
     entryMethod: ticket.entryMethod || "",
-    ownerType: ticket.ownerType,
+    ownerChannel: ticket.ownerType || "",
+    owner: {
+      name: ticket.ownerName || "",
+      phone: ticket.ownerPhone || "",
+    },
     branch: ticket.branch,
-    vehicle: ticket.vehicle,
+    vehicle: ticket.vehicle
+      ? {
+        id: String(ticket.vehicle._id || ticket.vehicle),
+        plate: ticket.vehicle.plate || "",
+        make: ticket.vehicle.make || "",
+        model: ticket.vehicle.model || "",
+        color: ticket.vehicle.color || "",
+        photo: ticket.vehicle.photo || "",
+      }
+      : null,
     keyTag: ticket.keyTag || "",
     garage: ticket.garage || "",
     slot: ticket.slot || "",
     receivingPoint: ticket.receivingPoint || "",
-    payment: ticket.payment || null,
-    createdBy: ticket.createdBy || null,
-    assignedDriver: ticket.assignedDriver || null,
-    parkingDriver: ticket.parkingDriver || null,
-    deliveryDriver: ticket.deliveryDriver || null,
-    keyReceivedBy: ticket.keyReceivedBy || null,
-    keyReleasedBy: ticket.keyReleasedBy || null,
-    keyReleasedTo: ticket.keyReleasedTo || null,
+    services: ticket.services || [],
+    payment: {
+      amount: ticket.payment?.amount ?? 0,
+      currency: ticket.payment?.currency || "QAR",
+      status: ticket.payment?.status || "",
+      method: ticket.payment?.method || "",
+    },
+    paymentRequirement: compactPaymentRequirement,
+    createdBy: compactCreatedBy,
+    assignedDriver: compactDriver,
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
     parkedAt: ticket.parkedAt || null,
     keyReceivedAt: ticket.keyReceivedAt || null,
     keyReleasedAt: ticket.keyReleasedAt || null,
-    retrieval: ticket.retrieval || null,
+    keyControl: compactKeyControl,
+    retrieval,
   };
 }
 
@@ -341,7 +455,7 @@ function resolveParkedAt(ticket) {
   if (ticket?.parkedAt) {
     return new Date(ticket.parkedAt);
   }
-  if ([TICKET_STATUS.PARKED, TICKET_STATUS.PARKED_IN].includes(ticket?.status) && ticket?.updatedAt) {
+  if (ticket?.status === TICKET_STATUS.PARKED_IN && ticket?.updatedAt) {
     return new Date(ticket.updatedAt);
   }
   return null;
@@ -399,24 +513,19 @@ function buildKeyControlMeta(ticket) {
 }
 
 const PARKING_ASSIGNABLE_STATUSES = [
-  TICKET_STATUS.NEW_TRANSACTION_CREATED,
-  TICKET_STATUS.CREATED,
+  TICKET_STATUS.READY_TO_BE_PARKED,
 ];
 
 const PARKING_ASSIGNED_STATUSES = [
   TICKET_STATUS.READY_TO_BE_PARKED,
-  TICKET_STATUS.ASSIGNED,
-  TICKET_STATUS.NOT_PARKED,
 ];
 
 const PARKED_STATUSES = [
   TICKET_STATUS.PARKED_IN,
-  TICKET_STATUS.PARKED,
 ];
 
 const RETRIEVAL_REQUESTED_STATUSES = [
   TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-  TICKET_STATUS.RETRIEVAL_REQUESTED,
 ];
 
 const DELIVERY_ASSIGNED_STATUSES = [
@@ -429,6 +538,52 @@ const ACTIVE_DELIVERY_STATUSES = [
   TICKET_STATUS.ON_THE_WAY,
   TICKET_STATUS.ARRIVED_FOR_DELIVERY,
 ];
+
+const DRIVER_BUSY_STATUSES = [
+  TICKET_STATUS.READY_TO_BE_PARKED,
+  TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+  TICKET_STATUS.ON_THE_WAY,
+  TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+];
+
+const PAYMENT_RESOLVED_STATUSES = [
+  PAYMENT_STATUS.PAID,
+  PAYMENT_STATUS.PREPAID,
+  PAYMENT_STATUS.CAMPAIGN,
+  PAYMENT_STATUS.MEMBERSHIP,
+  PAYMENT_STATUS.FREE_OF_CHARGE,
+];
+
+function isTicketPaymentResolved(ticket) {
+  return PAYMENT_RESOLVED_STATUSES.includes(ticket?.payment?.status);
+}
+
+function buildPaymentRequirement(ticket, stage = "GENERAL") {
+  const paymentStatus = ticket?.payment?.status || PAYMENT_STATUS.UNPAID;
+  const paymentCondition = ticket?.paymentCondition || PAYMENT_CONDITIONS.PAY_LATER;
+  const isResolved = isTicketPaymentResolved(ticket);
+  const isPayLaterDue = paymentCondition === PAYMENT_CONDITIONS.PAY_LATER && !isResolved;
+
+  let message = "";
+  if (isPayLaterDue && stage === "RETRIEVAL_REQUEST") {
+    message = "Payment is due now. Show payment options before delivery continues.";
+  } else if (isPayLaterDue && stage === "DELIVERY") {
+    message = "Collect payment before marking this ticket complete.";
+  } else if (!isResolved && stage === "CLOSE") {
+    message = "Ticket cannot be completed until payment is resolved.";
+  }
+
+  return {
+    paymentRequired: isPayLaterDue,
+    paymentCondition,
+    paymentStatus,
+    amount: ticket?.payment?.amount ?? 0,
+    currency: ticket?.payment?.currency || "QAR",
+    paymentLink: buildPaymentLink(ticket),
+    canComplete: isResolved,
+    message,
+  };
+}
 
 function resolveDriverForStatus(ticket, status) {
   if ([
@@ -671,17 +826,16 @@ async function emitRetrievalRequestedToOps({
 }
 
 // ─── Real-time: Notify car OWNER when ticket status changes ───────────────────
-// Covers: PARKED, ON_THE_WAY, DELIVERED
+// Covers owner-visible active ticket status updates.
 
 const STATUS_MESSAGES = {
   [TICKET_STATUS.PARKED_IN]:             "Your car has been parked safely.",
-  [TICKET_STATUS.PARKED]:               "Your car has been parked safely.",
   [TICKET_STATUS.REQUESTED_FOR_DELIVERY]: "Your retrieval request is being processed.",
   [TICKET_STATUS.ASSIGNED_FOR_DELIVERY]: "A driver has been assigned to bring your car.",
   [TICKET_STATUS.ON_THE_WAY]:           "Your car is on the way to the receiving point.",
   [TICKET_STATUS.ARRIVED_FOR_DELIVERY]:  "Your car has arrived at the receiving point.",
   [TICKET_STATUS.DELIVERED]:            "Your car is ready for pickup. Please mark as complete.",
-  [TICKET_STATUS.RETRIEVAL_REQUESTED]:  "Your retrieval request is being processed.",
+  [TICKET_STATUS.CLOSED]:               "Your valet ticket is closed.",
 };
 
 async function emitTicketStatusToOwner({ req, ticket }) {
@@ -703,6 +857,14 @@ async function emitTicketStatusToOwner({ req, ticket }) {
     if (!ownerUserId) return; // anonymous owner — cannot push
 
     const message = STATUS_MESSAGES[ticket.status] || `Ticket status updated to ${ticket.status}`;
+    const paymentRequirement = buildPaymentRequirement(
+      ticket,
+      ticket.status === TICKET_STATUS.REQUESTED_FOR_DELIVERY
+        ? "RETRIEVAL_REQUEST"
+        : ticket.status === TICKET_STATUS.DELIVERED
+          ? "DELIVERY"
+          : "GENERAL",
+    );
 
     io.to(`user_${ownerUserId}`).emit("ticket_status_update", {
       ticketId:       String(ticket._id),
@@ -710,6 +872,7 @@ async function emitTicketStatusToOwner({ req, ticket }) {
       status:         ticket.status,
       message,
       receivingPoint: ticket.receivingPoint || null,
+      paymentRequirement,
       updatedAt:      new Date().toISOString(),
     });
 
@@ -731,7 +894,7 @@ export async function assignDriver(req, res) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }
 
-  const { driverId } = parsed.data;
+  const { driverId, force } = parsed.data;
   if (!isValidObjectId(driverId)) {
     throw badRequest("driverId must be a valid ObjectId");
   }
@@ -751,6 +914,16 @@ export async function assignDriver(req, res) {
     || String(driver.branch) !== String(ticket.branch)
   ) {
     throw badRequest("Selected user is not an active driver");
+  }
+
+  if (driver.attendanceStatus !== "CHECKED_IN" && !force) {
+    throw conflict("Driver is not available for assignment", {
+      reason: driver.attendanceStatus === "ON_BREAK"
+        ? "Driver is currently on break"
+        : "Driver is not checked in",
+      attendanceStatus: driver.attendanceStatus,
+      guidance: "Select another available driver or resend with force=true if supervisor approves.",
+    });
   }
 
   const previousStatus = ticket.status;
@@ -783,6 +956,27 @@ export async function assignDriver(req, res) {
     throw conflict("Cannot change delivery driver after key has been released");
   }
 
+  const busyTicket = await Ticket.findOne({
+    _id: { $ne: ticket._id },
+    branch: ticket.branch,
+    status: { $in: DRIVER_BUSY_STATUSES },
+    $or: [
+      { assignedDriver: driverId },
+      { deliveryDriver: driverId },
+    ],
+  })
+    .select("ticketNumber status assignedDriver deliveryDriver")
+    .lean();
+
+  if (busyTicket && !force) {
+    throw conflict("Driver is already assigned to an active ticket", {
+      currentTicketId: String(busyTicket._id),
+      currentTicketNumber: busyTicket.ticketNumber,
+      currentTicketStatus: busyTicket.status,
+      guidance: "Select a free driver or resend with force=true if supervisor approves.",
+    });
+  }
+
   let updatedVehicle = null;
   if (parsed.data.vehicle && ticket.vehicle && isValidObjectId(ticket.vehicle)) {
     const vehicleUpdates = {};
@@ -813,9 +1007,7 @@ export async function assignDriver(req, res) {
     ticket.assignedDriver = driverId;
     ticket.parkingDriver = driverId;
     if (PARKING_ASSIGNABLE_STATUSES.includes(ticket.status)) {
-      ticket.status = ticket.status === TICKET_STATUS.NEW_TRANSACTION_CREATED
-        ? TICKET_STATUS.READY_TO_BE_PARKED
-        : TICKET_STATUS.ASSIGNED;
+      ticket.status = TICKET_STATUS.READY_TO_BE_PARKED;
     }
   }
   if (parsed.data.slot !== undefined) ticket.slot = parsed.data.slot;
@@ -825,6 +1017,7 @@ export async function assignDriver(req, res) {
   if (parsed.data.receivingPoint !== undefined) ticket.receivingPoint = parsed.data.receivingPoint;
   if (parsed.data.notes !== undefined) ticket.notes = parsed.data.notes;
   await ticket.save();
+  await User.updateOne({ _id: driverId }, { $set: { lastAssignedAt: new Date() } });
 
   await logTicketEvent({
     ticketId,
@@ -848,19 +1041,10 @@ export async function assignDriver(req, res) {
     driverId,
   });
 
-  const populatedTicket = await Ticket.findById(ticket._id)
-    .populate("vehicle")
-    .populate("assignedDriver", "fullName phone role")
-    .populate("parkingDriver", "fullName phone role")
-    .populate("deliveryDriver", "fullName phone role")
-    .lean();
-
   return res.status(200).json(
     new ApiResponse(
       200,
-      {
-        ticket: populatedTicket || ticket,
-      },
+      null,
       "Driver assigned successfully",
     ),
   );
@@ -1069,9 +1253,7 @@ export async function updateTicketStatus(req, res) {
     throw notFound("Ticket not found");
   }
 
-  const nextStatus = parsed.data.status === TICKET_STATUS.RETRIEVAL_REQUESTED
-    ? TICKET_STATUS.REQUESTED_FOR_DELIVERY
-    : parsed.data.status;
+  const nextStatus = parsed.data.status;
   const transitionAllowed = canTransitionStatus(ticket.status, nextStatus)
     || (PARKING_ASSIGNED_STATUSES.includes(ticket.status) && PARKED_STATUSES.includes(nextStatus))
     || (PARKED_STATUSES.includes(ticket.status) && RETRIEVAL_REQUESTED_STATUSES.includes(nextStatus))
@@ -1083,6 +1265,13 @@ export async function updateTicketStatus(req, res) {
 
   if (!transitionAllowed) {
     throw conflict(`Invalid status transition: ${ticket.status} -> ${nextStatus}`);
+  }
+
+  if (nextStatus === TICKET_STATUS.CLOSED && !isTicketPaymentResolved(ticket)) {
+    throw conflict("Ticket cannot be closed until payment is resolved", {
+      currentPaymentStatus: ticket.payment?.status || PAYMENT_STATUS.UNPAID,
+      allowedPaymentStatuses: PAYMENT_RESOLVED_STATUSES,
+    });
   }
 
   if (
@@ -1126,7 +1315,10 @@ export async function updateTicketStatus(req, res) {
     return res.status(200).json(
       new ApiResponse(
         200,
-        { ticket: populatedTicket || ticket },
+        {
+          ticket: populatedTicket || ticket,
+          paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
+        },
         "Retrieval requested successfully",
       ),
     );
@@ -1136,7 +1328,7 @@ export async function updateTicketStatus(req, res) {
   if (PARKED_STATUSES.includes(nextStatus) && !ticket.parkedAt) {
     ticket.parkedAt = new Date();
   }
-  if ([TICKET_STATUS.NOT_PARKED, TICKET_STATUS.READY_TO_BE_PARKED].includes(nextStatus)) {
+  if (nextStatus === TICKET_STATUS.READY_TO_BE_PARKED) {
     ticket.parkedAt = null;
     ticket.keyReceivedAt = null;
     ticket.keyReceivedBy = null;
@@ -1175,12 +1367,12 @@ export async function updateTicketStatus(req, res) {
   // ── Notify car owner in real-time for key status changes ──────────────────
   const ownerNotifyStatuses = [
     TICKET_STATUS.PARKED_IN,
-    TICKET_STATUS.PARKED,
     TICKET_STATUS.ON_THE_WAY,
     TICKET_STATUS.ARRIVED_FOR_DELIVERY,
     TICKET_STATUS.DELIVERED,
     TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+    TICKET_STATUS.CLOSED,
   ];
   if (ownerNotifyStatuses.includes(nextStatus)) {
     void emitTicketStatusToOwner({ req, ticket });
@@ -1189,9 +1381,124 @@ export async function updateTicketStatus(req, res) {
   const responseData = {
     message: "Ticket status updated successfully",
     ticket,
+    paymentRequirement: buildPaymentRequirement(
+      ticket,
+      nextStatus === TICKET_STATUS.DELIVERED ? "DELIVERY" : "GENERAL",
+    ),
   };
 
   return res.status(200).json(responseData);
+}
+
+export async function recordTicketPayment(req, res) {
+  const { ticketId } = req.params;
+  if (!isValidObjectId(ticketId)) {
+    throw badRequest("ticketId must be a valid ObjectId");
+  }
+
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const parsed = recordTicketPaymentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const data = parsed.data;
+  const ticket = await Ticket.findOne({ _id: ticketId, branch: req.user.branchId });
+  if (!ticket) {
+    throw notFound("Ticket not found");
+  }
+
+  if (ticket.status === TICKET_STATUS.CLOSED) {
+    throw conflict("Payment cannot be changed after ticket is closed");
+  }
+
+  if (
+    data.status === PAYMENT_STATUS.FREE_OF_CHARGE
+    && ![ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER].includes(req.user.role)
+  ) {
+    throw forbidden("Only supervisor or operations manager can mark a ticket as free of charge");
+  }
+
+  const amount = data.amount ?? ticket.payment?.amount ?? 0;
+  const receiptLink = data.receiptLink ?? ticket.payment?.receiptLink ?? "";
+  const terminalId = data.pos?.terminalId ?? data.terminalId ?? ticket.payment?.pos?.terminalId ?? "";
+  const bankTransactionRef = data.pos?.bankTransactionRef
+    ?? data.bankTransactionRef
+    ?? ticket.payment?.pos?.bankTransactionRef
+    ?? "";
+  const providerReference = data.online?.paymentReference
+    ?? data.providerReference
+    ?? ticket.payment?.online?.paymentReference
+    ?? "";
+
+  ticket.payment = {
+    ...(ticket.payment?.toObject ? ticket.payment.toObject() : ticket.payment || {}),
+    amount,
+    method: data.method,
+    status: data.status,
+    currency: data.currency,
+    receiptLink,
+    pos: {
+      ...(ticket.payment?.pos?.toObject ? ticket.payment.pos.toObject() : ticket.payment?.pos || {}),
+      terminalId,
+      bankTransactionRef,
+      confirmationStatus: data.pos?.confirmationStatus ?? ticket.payment?.pos?.confirmationStatus ?? "",
+      confirmedAt: data.pos?.confirmedAt ?? ticket.payment?.pos?.confirmedAt ?? null,
+    },
+    online: {
+      ...(ticket.payment?.online?.toObject ? ticket.payment.online.toObject() : ticket.payment?.online || {}),
+      provider: data.online?.provider ?? ticket.payment?.online?.provider ?? "",
+      paymentReference: providerReference,
+      paidAt: data.online?.paidAt ?? ticket.payment?.online?.paidAt ?? null,
+    },
+  };
+
+  await ticket.save();
+
+  await Payment.create({
+    ticket: ticket._id,
+    amount,
+    method: data.method,
+    status: data.status,
+    terminalId,
+    bankTransactionRef,
+    providerReference,
+    receiptLink,
+    processedBy: req.user.id,
+  });
+
+  await logTicketEvent({
+    ticketId: ticket._id,
+    status: ticket.status,
+    actor: req.user.id,
+    note: data.notes || "Payment updated",
+    meta: {
+      payment: {
+        amount,
+        method: data.method,
+        status: data.status,
+        currency: data.currency,
+        receiptLink,
+      },
+    },
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        status: ticket.status,
+        canClose: isTicketPaymentResolved(ticket),
+        payment: ticket.payment,
+      },
+      "Ticket payment updated successfully",
+    ),
+  );
 }
 
 export async function requestRetrieval(req, res) {
@@ -1252,6 +1559,7 @@ export async function requestRetrieval(req, res) {
       200,
       {
         ticket: populatedSourceTicket,
+        paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
       },
       "Retrieval requested successfully",
     ),
@@ -1433,11 +1741,20 @@ export async function listTickets(req, res) {
   const tickets = await Ticket.find(filter)
     .sort({ createdAt: -1 })
     .limit(100)
-    .populate("vehicle")
+    .populate("vehicle", "plate make model color photo")
     .populate("assignedDriver", "fullName phone role")
+    .populate("parkingDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
+    .populate("keyReceivedBy", "fullName phone role")
+    .populate("keyReleasedBy", "fullName phone role")
+    .populate("keyReleasedTo", "fullName phone role")
+    .populate("createdBy", "fullName phone role")
     .lean();
 
-  return res.status(200).json({ count: tickets.length, tickets });
+  return res.status(200).json({
+    count: tickets.length,
+    tickets: tickets.map(buildTicketSummary),
+  });
 }
 
 export async function getTicketHistory(req, res) {
@@ -1864,10 +2181,7 @@ export async function getKeyControllerQueue(req, res) {
           TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
           TICKET_STATUS.ON_THE_WAY,
           TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-          TICKET_STATUS.ASSIGNED,
-          TICKET_STATUS.NOT_PARKED,
-          TICKET_STATUS.PARKED,
-          TICKET_STATUS.RETRIEVAL_REQUESTED,
+          TICKET_STATUS.DELIVERED,
         ],
       },
   };
@@ -1900,17 +2214,11 @@ export async function getKeyControllerQueue(req, res) {
       keyControl: buildKeyControlMeta(ticket),
     }))
     .filter((ticket) => {
-      if (parkState === "PARKED") {
+      if (parkState === "PARKED_IN") {
         return [...PARKED_STATUSES, ...ACTIVE_DELIVERY_STATUSES].includes(ticket.status);
       }
-      if (parkState === "NOT_PARKED") {
-        return [
-          TICKET_STATUS.NEW_TRANSACTION_CREATED,
-          TICKET_STATUS.READY_TO_BE_PARKED,
-          TICKET_STATUS.CREATED,
-          TICKET_STATUS.ASSIGNED,
-          TICKET_STATUS.NOT_PARKED,
-        ].includes(ticket.status);
+      if (parkState === "NOT_PARKED_IN") {
+        return ticket.status === TICKET_STATUS.READY_TO_BE_PARKED;
       }
       return true;
     })
@@ -1964,7 +2272,7 @@ export async function markKeyReceived(req, res) {
   }
 
   if (!PARKED_STATUSES.includes(ticket.status)) {
-    throw conflict("Key can be marked received only when car status is PARKED");
+    throw conflict("Key can be marked received only when car status is PARKED_IN");
   }
 
   if (ticket.keyReceivedAt) {
@@ -2140,7 +2448,7 @@ export async function createManualCarArrival(req, res) {
     });
   }
 
-  const entryMethod = data.entryMethod || branch.defaultEntryMethod || undefined;
+  const entryMethod = data.entryMethod;
   const supportedEntryMethods = Array.isArray(branch.supportedEntryMethods) && branch.supportedEntryMethods.length
     ? branch.supportedEntryMethods
     : ENTRY_METHOD_VALUES;
@@ -2217,6 +2525,27 @@ export async function createManualCarArrival(req, res) {
     }
   }
 
+  const paymentForCreate = data.payment
+    ? {
+      amount: data.payment.amount,
+      method: data.payment.method,
+      status: PAYMENT_STATUS.PAID,
+      currency: data.payment.currency,
+      receiptLink: data.payment.receiptLink || "",
+      pos: {
+        terminalId: data.payment.terminalId || "",
+        bankTransactionRef: data.payment.bankTransactionRef || "",
+        confirmationStatus: data.payment.method === "CASH" ? "CASH_RECEIVED" : "MANUALLY_CONFIRMED",
+        confirmedAt: new Date(),
+      },
+      online: {
+        provider: "",
+        paymentReference: "",
+        paidAt: null,
+      },
+    }
+    : undefined;
+
   const vehicle = await Vehicle.create({
     plate: data.vehicle.plate,
     make: data.vehicle.make,
@@ -2234,7 +2563,7 @@ export async function createManualCarArrival(req, res) {
     ownerUser: null,
     branch: branch._id,
     vehicle: vehicle._id,
-    status: driver ? TICKET_STATUS.READY_TO_BE_PARKED : TICKET_STATUS.NEW_TRANSACTION_CREATED,
+    status: TICKET_STATUS.READY_TO_BE_PARKED,
     assignedDriver: driver?._id || null,
     parkingDriver: driver?._id || null,
     entryMethod,
@@ -2247,21 +2576,54 @@ export async function createManualCarArrival(req, res) {
     receivingPoint: data.receivingPoint || "",
     notes: data.notes || "",
     services: data.services || [],
+    ...(paymentForCreate ? { payment: paymentForCreate } : {}),
     createdBy: req.user.id,
   });
+
+  if (paymentForCreate) {
+    await Payment.create({
+      ticket: ticket._id,
+      amount: paymentForCreate.amount,
+      method: paymentForCreate.method,
+      status: paymentForCreate.status,
+      terminalId: paymentForCreate.pos.terminalId,
+      bankTransactionRef: paymentForCreate.pos.bankTransactionRef,
+      providerReference: "",
+      receiptLink: paymentForCreate.receiptLink,
+      processedBy: req.user.id,
+    });
+  }
 
   await logTicketEvent({
     ticketId: ticket._id,
     status: ticket.status,
     actor: req.user.id,
-    note: "Car arrived at reception",
+    note: "Ticket issued",
     meta: {
       serviceType,
       paymentCondition,
       entryMethod,
       driverId: driver ? String(driver._id) : null,
+      paymentStatus: paymentForCreate ? PAYMENT_STATUS.PAID : PAYMENT_STATUS.UNPAID,
     },
   });
+
+  if (paymentForCreate) {
+    await logTicketEvent({
+      ticketId: ticket._id,
+      status: ticket.status,
+      actor: req.user.id,
+      note: data.payment?.notes || "PAY_NOW payment collected at ticket creation",
+      meta: {
+        payment: {
+          amount: paymentForCreate.amount,
+          method: paymentForCreate.method,
+          status: paymentForCreate.status,
+          currency: paymentForCreate.currency,
+        },
+      },
+    });
+  }
 
   const isPrintEntry = [
     ENTRY_METHODS.PRINTER,
@@ -2272,7 +2634,7 @@ export async function createManualCarArrival(req, res) {
     entryMethod: entryMethod || "",
     qrTarget: data.ownerHasApp ? "APP_SCANNER" : entryMethod || "",
     qrTargetLink: data.ownerHasApp ? ownerAppQrPayload : "",
-    instantConfirmation: "Ticket created successfully. Vehicle is ready for parking.",
+    instantConfirmation: "Ticket issued successfully. Vehicle is ready for parking.",
     vehicleDetails,
     paymentLink,
     smsDelivery,
@@ -2304,33 +2666,15 @@ export async function createManualCarArrival(req, res) {
   return res.status(201).json(
     new ApiResponse(
       201,
-      {
-        ticketId: String(ticket._id),
-        ticketNumber: ticket.ticketNumber,
-        valetCode: ticket.valetCode,
-        status: ticket.status,
-        serviceType: ticket.serviceType,
-        paymentCondition: ticket.paymentCondition,
-        entryMethod: ticket.entryMethod || "",
-        driver: driver
-          ? {
-            id: String(driver._id),
-            fullName: driver.fullName,
-            phone: driver.phone,
-          }
-          : null,
-        vehicle: vehicleDetails,
-        ownerFlow,
-        
-      },
-      "Ticket created successfully",
+      null,
+      "Ticket issued successfully",
     ),
   );
 }
 
 // ─── PATCH /api/v1/tickets/:ticketId/park ─────────────────────────────────────
 // Driver submits parking details (slot, keyTag, keyNote, photo) after parking
-// Transitions ticket status: ASSIGNED → PARKED
+// Transitions ticket status: READY_TO_BE_PARKED -> PARKED_IN
 
 const parkCarSchema = z.object({
   slot:    z.string().trim().max(60).optional(),
@@ -2357,14 +2701,10 @@ export async function parkCar(req, res) {
   }
 
   // Ticket must have a parking driver assigned before it can be parked.
-  const allowedStatuses = [
-    TICKET_STATUS.READY_TO_BE_PARKED,
-    TICKET_STATUS.ASSIGNED,
-    TICKET_STATUS.NOT_PARKED,
-  ];
+  const allowedStatuses = [TICKET_STATUS.READY_TO_BE_PARKED];
   if (!allowedStatuses.includes(ticket.status)) {
     throw conflict(
-      `Cannot park ticket. Current status is "${ticket.status}". Must be READY_TO_BE_PARKED, ASSIGNED, or NOT_PARKED.`,
+      `Cannot park ticket. Current status is "${ticket.status}". Must be READY_TO_BE_PARKED.`,
     );
   }
 
