@@ -48,6 +48,7 @@ function safeUserResponse(user) {
     phone: user.phone,
     role: user.role,
     fullName: user.fullName,
+    profileImage: user.profileImage || "",
     branchId: user.branch ? String(user.branch) : null,
     attendanceStatus: user.attendanceStatus || "CHECKED_OUT",
   };
@@ -185,6 +186,7 @@ export async function getMe(req, res) {
   }
 
   return res.json(
-    new ApiResponse(200, safeUserResponse(user), "Profile retrieved successfully TEST"),
+    new ApiResponse(200, safeUserResponse(user), "Profile retrieved successfully"),
   );
 }
+ 

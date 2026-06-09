@@ -113,6 +113,15 @@ Frontend flow:
 
 Backend must not create the final transaction before entry method success.
 
+Current backend alignment:
+
+- Immediate-success methods use `POST /api/v1/tickets/issue` and create the final ticket immediately.
+- Scan-confirmed methods use pending issue intents:
+- `POST /api/v1/tickets/issue-intents` creates a short-lived pending intent for `QR_CODE` or `WHATSAPP`.
+- `POST /api/v1/tickets/issue-intents/:reference/confirm-app` is called by the owner app after scanning a `QR_CODE` intent and creates the final ticket linked to `ownerUser`.
+- WhatsApp webhook consumes `/park my car <intentReference>` and creates the final ticket linked to the WhatsApp sender phone.
+- Direct `/api/v1/tickets/issue` must reject `QR_CODE` and `WHATSAPP` to prevent premature ticket creation.
+
 ## Service Types Vs Add-On Services
 
 `serviceType` is the main valet package:
@@ -136,6 +145,7 @@ Backend must not create the final transaction before entry method success.
 Supported methods:
 
 - WhatsApp QR: Guest scans QR and WhatsApp opens with ticket/request flow.
+- QR Code Customer App: for owners with the app only. Receptionist shows an app QR intent; owner scans it inside the app; backend creates the ticket linked to that owner.
 - SMS: Ticket sent to guest phone with request link.
 - NFC Card: Receptionist writes transaction data to card. Card is erased after closure.
 - Classic Ticket: Pre-printed barcode/QR ticket linked to transaction.
@@ -198,7 +208,8 @@ Retrieval must stay on the same transaction/ticket. Do not create a second main 
 Payment condition is selected at transaction creation:
 
 - `PREPAID_VOUCHER`: Voucher/coupon verified before ticket creation.
-- `PAY_NOW`: Cash/card/POS at creation. MVP supports manual cash/card/POS recording; SADAD/online gateway integration will reuse payment provider/reference fields later.
+- `PAY_NOW`: Cash/POS/manual payment creates ticket immediately after staff confirmation.
+- `PAY_NOW` + `ONLINE`/SADAD creates a payment intent first; the ticket is created only after backend callback verification marks the intent paid.
 - `PAY_LATER`: Payment at retrieval/delivery.
 - `CAMPAIGN`: Promotional discount/third-party settlement.
 - `MEMBERSHIP`: Membership card/ID/QR/NFC validated.
@@ -223,6 +234,10 @@ Online payment:
 
 - Only available through Owner app.
 - If online payment fails, guest pays manually at reception.
+- Current SADAD intent endpoints:
+- `POST /api/v1/payments/sadad/initiate`: stores pending ticket payload and returns payment intent reference.
+- `POST /api/v1/payments/sadad/callback`: receives SADAD result and issues the ticket on verified success.
+- `GET /api/v1/payments/:paymentIntentId/status`: frontend polling endpoint after checkout.
 
 Non-payment/refused payment:
 

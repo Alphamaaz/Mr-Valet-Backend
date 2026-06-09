@@ -1,9 +1,12 @@
 import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
+import { TicketIssueIntent, TICKET_ISSUE_INTENT_STATUS } from "../models/TicketIssueIntent.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
+import { ENTRY_METHODS } from "../constants/entryMethods.js";
 import { isValidWhatsAppSignature, sendWhatsAppTextMessage } from "../services/whatsapp.service.js";
+import { issueTicketFromPayload } from "./ticket.controller.js";
 
 function normalizePhone(phone) {
   return String(phone || "").replace(/\D/g, "");
@@ -78,7 +81,7 @@ function extractIncomingMessages(payload) {
 async function sendUsageHelp(phone) {
   await sendWhatsAppTextMessage({
     phone,
-    message: "Use one of these commands:\n/park my car BB 777\n/request BB 777\n(Valet code also works)",
+    message: "Use one of these commands:\n/park my car WI-DM-123456\n/request DM-123\nUse the QR code reference for parking and the valet code for retrieval.",
   });
 }
 
@@ -118,7 +121,170 @@ async function findWhatsAppTicketByIdentifier(identifier) {
     .lean();
 }
 
+async function findWhatsAppIntentByReference(identifier) {
+  const normalized = normalizeIdentifier(identifier);
+  if (!normalized) {
+    return null;
+  }
+
+  return TicketIssueIntent.findOne({
+    reference: normalized,
+    entryMethod: ENTRY_METHODS.WHATSAPP,
+    status: {
+      $in: [
+        TICKET_ISSUE_INTENT_STATUS.PENDING,
+        TICKET_ISSUE_INTENT_STATUS.PROCESSING,
+        TICKET_ISSUE_INTENT_STATUS.COMPLETED,
+      ],
+    },
+  }).lean();
+}
+
+async function replyWithTicketConfirmation({ phone, ticket }) {
+  const driverName = ticket.assignedDriver?.fullName || "Assigned driver";
+  const paymentLink = buildPaymentLink(ticket.ticketNumber);
+  const paymentLine = paymentLink ? `\nPayment link: ${paymentLink}` : "";
+
+  await sendWhatsAppTextMessage({
+    phone,
+    message: `Ticket #${ticket.ticketNumber}\nValet code: ${ticket.valetCode}\nYour runner is "${driverName}".\nYour car is received and being parked.${paymentLine}\n\nTo request your car later, send:\n/request ${ticket.valetCode}`,
+  });
+}
+
+async function createTicketFromWhatsAppIntent({ intent, from }) {
+  const lockResult = await TicketIssueIntent.updateOne(
+    {
+      _id: intent._id,
+      status: TICKET_ISSUE_INTENT_STATUS.PENDING,
+      expiresAt: { $gt: new Date() },
+    },
+    {
+      $set: {
+        status: TICKET_ISSUE_INTENT_STATUS.PROCESSING,
+        ownerPhone: from,
+      },
+    },
+  );
+
+  if (lockResult.modifiedCount !== 1) {
+    const latest = await TicketIssueIntent.findById(intent._id)
+      .populate({
+        path: "ticket",
+        populate: [
+          { path: "assignedDriver", select: "fullName" },
+          { path: "vehicle", select: "plate" },
+        ],
+      })
+      .lean();
+
+    if (latest?.status === TICKET_ISSUE_INTENT_STATUS.COMPLETED && latest.ticket) {
+      return latest.ticket;
+    }
+
+    return null;
+  }
+
+  try {
+    const { ticket } = await issueTicketFromPayload({
+      data: {
+        ...intent.ticketPayload,
+        ownerHasApp: false,
+        ownerPhone: from,
+      },
+      actorUser: {
+        id: String(intent.createdBy),
+        branchId: String(intent.branch),
+      },
+    });
+
+    await TicketIssueIntent.updateOne(
+      { _id: intent._id },
+      {
+        $set: {
+          status: TICKET_ISSUE_INTENT_STATUS.COMPLETED,
+          ticket: ticket._id,
+          ownerPhone: from,
+          completedAt: new Date(),
+        },
+      },
+    );
+
+    return Ticket.findById(ticket._id)
+      .populate("assignedDriver", "fullName")
+      .populate("vehicle", "plate")
+      .lean();
+  } catch (error) {
+    await TicketIssueIntent.updateOne(
+      { _id: intent._id, status: TICKET_ISSUE_INTENT_STATUS.PROCESSING },
+      {
+        $set: {
+          status: TICKET_ISSUE_INTENT_STATUS.PENDING,
+          meta: {
+            lastError: error?.message || "Ticket creation failed",
+            lastErrorAt: new Date(),
+          },
+        },
+      },
+    );
+    throw error;
+  }
+}
+
 async function handleParkCommand({ from, identifier }) {
+  const intent = await findWhatsAppIntentByReference(identifier);
+  if (intent) {
+    if (intent.status === TICKET_ISSUE_INTENT_STATUS.PROCESSING) {
+      await sendWhatsAppTextMessage({
+        phone: from,
+        message: "Ticket creation is already processing. Please wait a moment.",
+      });
+      return;
+    }
+
+    if (intent.status === TICKET_ISSUE_INTENT_STATUS.COMPLETED) {
+      const ticket = await Ticket.findById(intent.ticket)
+        .populate("assignedDriver", "fullName")
+        .populate("vehicle", "plate")
+        .lean();
+      if (ticket) {
+        await replyWithTicketConfirmation({ phone: from, ticket });
+        return;
+      }
+    }
+
+    if (intent.expiresAt && new Date(intent.expiresAt).getTime() < Date.now()) {
+      await TicketIssueIntent.updateOne(
+        { _id: intent._id, status: TICKET_ISSUE_INTENT_STATUS.PENDING },
+        { $set: { status: TICKET_ISSUE_INTENT_STATUS.EXPIRED } },
+      );
+      await sendWhatsAppTextMessage({
+        phone: from,
+        message: "This WhatsApp ticket QR has expired. Please ask reception to generate a new one.",
+      });
+      return;
+    }
+
+    try {
+      const createdTicket = await createTicketFromWhatsAppIntent({ intent, from });
+      if (createdTicket) {
+        await replyWithTicketConfirmation({ phone: from, ticket: createdTicket });
+        return;
+      }
+
+      await sendWhatsAppTextMessage({
+        phone: from,
+        message: "Ticket creation is already in progress. Please wait a moment.",
+      });
+      return;
+    } catch (error) {
+      await sendWhatsAppTextMessage({
+        phone: from,
+        message: `Ticket could not be created. Please contact reception. Reason: ${error?.message || "Unknown error"}`,
+      });
+      return;
+    }
+  }
+
   const ticket = await findWhatsAppTicketByIdentifier(identifier);
 
   if (!ticket) {
@@ -142,14 +308,7 @@ async function handleParkCommand({ from, identifier }) {
     await Ticket.updateOne({ _id: ticket._id }, { $set: { ownerPhone: from } });
   }
 
-  const driverName = ticket.assignedDriver?.fullName || "Assigned driver";
-  const paymentLink = buildPaymentLink(ticket.ticketNumber);
-  const paymentLine = paymentLink ? `\nPayment link: ${paymentLink}` : "";
-
-  await sendWhatsAppTextMessage({
-    phone: from,
-    message: `Ticket #${ticket.ticketNumber}\nYour runner is "${driverName}".\nYour car is received and being parked.${paymentLine}`,
-  });
+  await replyWithTicketConfirmation({ phone: from, ticket });
 }
 
 async function handleRequestCommand({ from, identifier }) {

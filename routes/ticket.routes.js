@@ -2,7 +2,9 @@ import { Router } from "express";
 import {
   assignDriver,
   claimDamage,
+  confirmOwnerAppIssueIntent,
   createManualCarArrival,
+  createTicketIssueIntent,
   getDamageClaims,
   getKeyControllerQueue,
   getMyAssignedTickets,
@@ -100,6 +102,18 @@ router.post(
   "/issue",
   requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(createManualCarArrival),
+);
+
+router.post(
+  "/issue-intents",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(createTicketIssueIntent),
+);
+
+router.post(
+  "/issue-intents/:reference/confirm-app",
+  requireRoles(ROLES.OWNER),
+  asyncHandler(confirmOwnerAppIssueIntent),
 );
 
 router.patch(

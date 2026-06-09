@@ -11,6 +11,7 @@ import employeeRoutes from "./employee.routes.js";
 import dashboardRoutes from "./dashboard.routes.js";
 import subscriptionRoutes from "./subscription.routes.js";
 import serviceRoutes from "./service.routes.js";
+import paymentRoutes from "./payment.routes.js";
 
 const router = Router();
 
@@ -26,5 +27,6 @@ router.use("/v1/employees", employeeRoutes);
 router.use("/v1/dashboard", dashboardRoutes);
 router.use("/v1/subscriptions", subscriptionRoutes);
 router.use("/v1/services", serviceRoutes);
+router.use("/v1/payments", paymentRoutes);
 
 export default router;

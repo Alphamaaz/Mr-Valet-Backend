@@ -1,10 +1,12 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 import { z } from "zod";
 import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js";
 import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
 import { DamageReport } from "../models/DamageReport.js";
 import { Payment } from "../models/Payment.js";
+import { TicketIssueIntent, TICKET_ISSUE_INTENT_STATUS } from "../models/TicketIssueIntent.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { User } from "../models/User.js";
 import { Branch } from "../models/Branch.js";
@@ -91,6 +93,26 @@ const manualCarArrivalSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["payment"],
       message: "payment is required when paymentCondition is PAY_NOW",
+    });
+  }
+});
+
+const ticketIssueIntentSchema = manualCarArrivalSchema.safeExtend({
+  entryMethod: z.enum([ENTRY_METHODS.QR_CODE, ENTRY_METHODS.WHATSAPP]),
+}).superRefine((data, ctx) => {
+  if (data.entryMethod === ENTRY_METHODS.QR_CODE && !data.ownerHasApp) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ownerHasApp"],
+      message: "ownerHasApp must be true when entryMethod is QR_CODE",
+    });
+  }
+
+  if (data.entryMethod === ENTRY_METHODS.WHATSAPP && data.ownerHasApp) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ownerHasApp"],
+      message: "ownerHasApp must be false when entryMethod is WHATSAPP",
     });
   }
 });
@@ -632,6 +654,98 @@ function buildOwnerAppScanPayload(ticket) {
     ticketNumber: ticket.ticketNumber,
     valetCode: ticket.valetCode,
   });
+}
+
+function buildOwnerAppIntentPayload(reference) {
+  return JSON.stringify({
+    type: "OWNER_APP_TICKET_LINK",
+    reference,
+  });
+}
+
+function getIssueIntentExpiry() {
+  const ttlMinutes = Number(process.env.TICKET_ISSUE_INTENT_TTL_MINUTES || 30);
+  const ttlMs = Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes * 60 * 1000 : 30 * 60 * 1000;
+  return new Date(Date.now() + ttlMs);
+}
+
+async function generateIssueIntentReference(entryMethod, branchCode = "MV") {
+  const prefix = entryMethod === ENTRY_METHODS.WHATSAPP ? "WI" : "QI";
+  const normalizedBranchCode = String(branchCode || "MV")
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 4)
+    .toUpperCase() || "MV";
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const suffix = crypto.randomInt(100000, 999999);
+    const reference = `${prefix}-${normalizedBranchCode}-${suffix}`;
+    // Unique index also protects us; this avoids common collisions before insert.
+    // eslint-disable-next-line no-await-in-loop
+    const exists = await TicketIssueIntent.exists({ reference });
+    if (!exists) {
+      return reference;
+    }
+  }
+
+  return `${prefix}-${normalizedBranchCode}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+async function validateIssueIntentPayload({ data, actorUser }) {
+  if (!actorUser?.branchId || !isValidObjectId(actorUser.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const branch = await Branch.findOne({ _id: actorUser.branchId, isActive: true }).lean();
+  if (!branch) {
+    throw badRequest("Your branch is invalid or inactive");
+  }
+
+  const supportedEntryMethods = Array.isArray(branch.supportedEntryMethods) && branch.supportedEntryMethods.length
+    ? branch.supportedEntryMethods
+    : ENTRY_METHOD_VALUES;
+  if (!supportedEntryMethods.includes(data.entryMethod)) {
+    throw badRequest(`Entry method ${data.entryMethod} is not enabled for this branch`, {
+      allowedEntryMethods: supportedEntryMethods,
+    });
+  }
+
+  const serviceType = data.serviceType || branch.serviceTypes?.find((item) => item.isActive)?.code || "NORMAL_VALET";
+  const activeServiceCodes = Array.isArray(branch.serviceTypes)
+    ? branch.serviceTypes.filter((item) => item.isActive).map((item) => item.code)
+    : [];
+  if (activeServiceCodes.length && !activeServiceCodes.includes(serviceType)) {
+    throw badRequest(`Service type ${serviceType} is not enabled for this branch`, {
+      allowedServiceTypes: activeServiceCodes,
+    });
+  }
+
+  const paymentCondition = data.paymentCondition || PAYMENT_CONDITIONS.PAY_LATER;
+  const allowedPaymentConditions = Array.isArray(branch.allowedPaymentConditions) && branch.allowedPaymentConditions.length
+    ? branch.allowedPaymentConditions
+    : PAYMENT_CONDITION_VALUES;
+  if (!allowedPaymentConditions.includes(paymentCondition)) {
+    throw badRequest(`Payment condition ${paymentCondition} is not enabled for this branch`, {
+      allowedPaymentConditions,
+    });
+  }
+
+  if (data.driverId) {
+    if (!isValidObjectId(data.driverId)) {
+      throw badRequest("driverId must be a valid ObjectId");
+    }
+
+    const driver = await User.findById(data.driverId).select("_id role isActive branch").lean();
+    if (
+      !driver
+      || driver.role !== ROLES.DRIVER
+      || !driver.isActive
+      || String(driver.branch) !== String(branch._id)
+    ) {
+      throw badRequest("Selected user is not an active driver in this branch");
+    }
+  }
+
+  return { branch, serviceType, paymentCondition };
 }
 
 function buildTicketSmsBody({
@@ -2411,18 +2525,12 @@ export async function releaseKey(req, res) {
   );
 }
 
-export async function createManualCarArrival(req, res) {
-  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+export async function issueTicketFromPayload({ data, actorUser, verifiedPayment = null }) {
+  if (!actorUser?.branchId || !isValidObjectId(actorUser.branchId)) {
     throw forbidden("User is not assigned to a valid branch");
   }
 
-  const parsed = manualCarArrivalSchema.safeParse(req.body);
-  if (!parsed.success) {
-    throw badRequest("Invalid request payload", parsed.error.flatten());
-  }
-
-  const data = parsed.data;
-  const branch = await Branch.findOne({ _id: req.user.branchId, isActive: true }).lean();
+  const branch = await Branch.findOne({ _id: actorUser.branchId, isActive: true }).lean();
 
   if (!branch) {
     throw badRequest("Your branch is invalid or inactive");
@@ -2483,7 +2591,10 @@ export async function createManualCarArrival(req, res) {
     model: data.vehicle.model,
     color: data.vehicle.color,
   };
-  const ownerType = data.ownerHasApp ? OWNER_TYPES.APP : OWNER_TYPES.WHATSAPP;
+  const ownerUserId = data.ownerUserId && isValidObjectId(data.ownerUserId)
+    ? data.ownerUserId
+    : null;
+  const ownerType = ownerUserId || data.ownerHasApp ? OWNER_TYPES.APP : OWNER_TYPES.WHATSAPP;
   const tempTicketForDelivery = {
     ticketNumber,
     valetCode,
@@ -2525,23 +2636,28 @@ export async function createManualCarArrival(req, res) {
     }
   }
 
-  const paymentForCreate = data.payment
+  const paymentSource = verifiedPayment || data.payment;
+  const paymentForCreate = paymentSource
     ? {
-      amount: data.payment.amount,
-      method: data.payment.method,
+      amount: paymentSource.amount,
+      method: paymentSource.method,
       status: PAYMENT_STATUS.PAID,
-      currency: data.payment.currency,
-      receiptLink: data.payment.receiptLink || "",
+      currency: paymentSource.currency || "QAR",
+      receiptLink: paymentSource.receiptLink || "",
       pos: {
-        terminalId: data.payment.terminalId || "",
-        bankTransactionRef: data.payment.bankTransactionRef || "",
-        confirmationStatus: data.payment.method === "CASH" ? "CASH_RECEIVED" : "MANUALLY_CONFIRMED",
+        terminalId: paymentSource.terminalId || "",
+        bankTransactionRef: paymentSource.bankTransactionRef || "",
+        confirmationStatus: paymentSource.method === "CASH"
+          ? "CASH_RECEIVED"
+          : paymentSource.method === "ONLINE"
+            ? "PROVIDER_CONFIRMED"
+            : "MANUALLY_CONFIRMED",
         confirmedAt: new Date(),
       },
       online: {
-        provider: "",
-        paymentReference: "",
-        paidAt: null,
+        provider: paymentSource.provider || "",
+        paymentReference: paymentSource.providerReference || "",
+        paidAt: paymentSource.method === "ONLINE" ? new Date() : null,
       },
     }
     : undefined;
@@ -2560,7 +2676,7 @@ export async function createManualCarArrival(req, res) {
     ownerType,
     ownerPhone: data.ownerPhone || "",
     ownerName: data.ownerName || "",
-    ownerUser: null,
+    ownerUser: ownerUserId,
     branch: branch._id,
     vehicle: vehicle._id,
     status: TICKET_STATUS.READY_TO_BE_PARKED,
@@ -2577,7 +2693,7 @@ export async function createManualCarArrival(req, res) {
     notes: data.notes || "",
     services: data.services || [],
     ...(paymentForCreate ? { payment: paymentForCreate } : {}),
-    createdBy: req.user.id,
+    createdBy: actorUser.id,
   });
 
   if (paymentForCreate) {
@@ -2588,16 +2704,16 @@ export async function createManualCarArrival(req, res) {
       status: paymentForCreate.status,
       terminalId: paymentForCreate.pos.terminalId,
       bankTransactionRef: paymentForCreate.pos.bankTransactionRef,
-      providerReference: "",
+      providerReference: paymentSource.providerReference || "",
       receiptLink: paymentForCreate.receiptLink,
-      processedBy: req.user.id,
+      processedBy: actorUser.id,
     });
   }
 
   await logTicketEvent({
     ticketId: ticket._id,
     status: ticket.status,
-    actor: req.user.id,
+    actor: actorUser.id,
     note: "Ticket issued",
     meta: {
       serviceType,
@@ -2612,8 +2728,8 @@ export async function createManualCarArrival(req, res) {
     await logTicketEvent({
       ticketId: ticket._id,
       status: ticket.status,
-      actor: req.user.id,
-      note: data.payment?.notes || "PAY_NOW payment collected at ticket creation",
+      actor: actorUser.id,
+      note: paymentSource?.notes || "PAY_NOW payment collected at ticket creation",
       meta: {
         payment: {
           amount: paymentForCreate.amount,
@@ -2625,43 +2741,25 @@ export async function createManualCarArrival(req, res) {
     });
   }
 
-  const isPrintEntry = [
-    ENTRY_METHODS.PRINTER,
-    ENTRY_METHODS.SERIALIZED_PAPER,
-  ].includes(entryMethod);
-  const ownerFlow = {
-    ownerType,
-    entryMethod: entryMethod || "",
-    qrTarget: data.ownerHasApp ? "APP_SCANNER" : entryMethod || "",
-    qrTargetLink: data.ownerHasApp ? ownerAppQrPayload : "",
-    instantConfirmation: "Ticket issued successfully. Vehicle is ready for parking.",
-    vehicleDetails,
-    paymentLink,
-    smsDelivery,
-    printableTicket: isPrintEntry
-      ? {
-        ticketNumber: ticket.ticketNumber,
-        valetCode: ticket.valetCode,
-        plate: vehicleDetails.plate,
-        make: vehicleDetails.make,
-        model: vehicleDetails.model,
-        color: vehicleDetails.color,
-        garage: ticket.garage || "",
-        slot: ticket.slot || "",
-        keyTag: ticket.keyTag || "",
-        receivingPoint: ticket.receivingPoint || "",
-      }
-      : null,
-  };
-  if (!data.ownerHasApp && [ENTRY_METHODS.WHATSAPP, ENTRY_METHODS.QR_CODE, ENTRY_METHODS.CAMERA].includes(entryMethod)) {
-    ownerFlow.whatsappCommand = whatsappCommand;
-    ownerFlow.whatsappPrefillLink = whatsappPrefillLink;
-    ownerFlow.qrTarget = "WHATSAPP";
-    ownerFlow.qrTargetLink = whatsappPrefillLink;
+  return { ticket };
+}
+
+export async function createManualCarArrival(req, res) {
+  const parsed = manualCarArrivalSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
   }
-  if (data.ownerHasApp || entryMethod === ENTRY_METHODS.QR_CODE) {
-    ownerFlow.ownerAppQrPayload = ownerAppQrPayload;
+
+  if ([ENTRY_METHODS.QR_CODE, ENTRY_METHODS.WHATSAPP].includes(parsed.data.entryMethod)) {
+    throw badRequest(
+      "QR_CODE and WHATSAPP tickets must be started with /api/v1/tickets/issue-intents and created after the guest scan succeeds",
+    );
   }
+
+  await issueTicketFromPayload({
+    data: parsed.data,
+    actorUser: req.user,
+  });
 
   return res.status(201).json(
     new ApiResponse(
@@ -2675,6 +2773,123 @@ export async function createManualCarArrival(req, res) {
 // ─── PATCH /api/v1/tickets/:ticketId/park ─────────────────────────────────────
 // Driver submits parking details (slot, keyTag, keyNote, photo) after parking
 // Transitions ticket status: READY_TO_BE_PARKED -> PARKED_IN
+
+export async function createTicketIssueIntent(req, res) {
+  const parsed = ticketIssueIntentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const data = parsed.data;
+  const { branch, serviceType, paymentCondition } = await validateIssueIntentPayload({
+    data,
+    actorUser: req.user,
+  });
+
+  if (data.entryMethod === ENTRY_METHODS.WHATSAPP && !process.env.WHATSAPP_BUSINESS_PHONE) {
+    throw badRequest("WHATSAPP_BUSINESS_PHONE is required to generate a WhatsApp QR link");
+  }
+
+  const reference = await generateIssueIntentReference(data.entryMethod, branch.code);
+  const payload = {
+    ...data,
+    serviceType,
+    paymentCondition,
+    ownerHasApp: data.entryMethod === ENTRY_METHODS.QR_CODE,
+  };
+
+  const intent = await TicketIssueIntent.create({
+    reference,
+    entryMethod: data.entryMethod,
+    branch: branch._id,
+    createdBy: req.user.id,
+    ticketPayload: payload,
+    expiresAt: getIssueIntentExpiry(),
+  });
+
+  const response = {
+    intentId: String(intent._id),
+    reference,
+    entryMethod: data.entryMethod,
+    expiresAt: intent.expiresAt,
+  };
+
+  if (data.entryMethod === ENTRY_METHODS.WHATSAPP) {
+    const { command, link } = buildWhatsAppPrefillLink(reference);
+    response.payloadType = "WHATSAPP_QR";
+    response.qrPayload = link;
+    response.command = command;
+  } else {
+    response.payloadType = "APP_QR";
+    response.qrPayload = buildOwnerAppIntentPayload(reference);
+  }
+
+  return res.status(201).json(
+    new ApiResponse(
+      201,
+      response,
+      "Ticket issue intent created successfully",
+    ),
+  );
+}
+
+export async function confirmOwnerAppIssueIntent(req, res) {
+  const { reference } = req.params;
+  const normalizedReference = String(reference || "").trim().toUpperCase();
+  if (!normalizedReference) {
+    throw badRequest("reference is required");
+  }
+
+  const intent = await TicketIssueIntent.findOne({ reference: normalizedReference });
+  if (!intent) {
+    throw notFound("Ticket issue intent not found");
+  }
+
+  if (intent.entryMethod !== ENTRY_METHODS.QR_CODE) {
+    throw badRequest("This intent is not for owner app QR confirmation");
+  }
+
+  if (intent.status === TICKET_ISSUE_INTENT_STATUS.COMPLETED) {
+    return res.status(200).json(
+      new ApiResponse(200, null, "Ticket already created for this QR code"),
+    );
+  }
+
+  if (intent.status !== TICKET_ISSUE_INTENT_STATUS.PENDING) {
+    throw conflict(`Cannot confirm an intent with status ${intent.status}`);
+  }
+
+  if (intent.expiresAt && intent.expiresAt.getTime() < Date.now()) {
+    intent.status = TICKET_ISSUE_INTENT_STATUS.EXPIRED;
+    await intent.save();
+    throw conflict("Ticket QR code has expired. Ask reception to generate a new QR code");
+  }
+
+  const { ticket } = await issueTicketFromPayload({
+    data: {
+      ...intent.ticketPayload,
+      ownerHasApp: true,
+      ownerUserId: req.user.id,
+      ownerPhone: req.user.phone || intent.ticketPayload.ownerPhone || "",
+      ownerName: intent.ticketPayload.ownerName || req.user.fullName || "",
+    },
+    actorUser: {
+      id: String(intent.createdBy),
+      branchId: String(intent.branch),
+    },
+  });
+
+  intent.status = TICKET_ISSUE_INTENT_STATUS.COMPLETED;
+  intent.ticket = ticket._id;
+  intent.ownerUser = req.user.id;
+  intent.ownerPhone = req.user.phone || "";
+  intent.completedAt = new Date();
+  await intent.save();
+
+  return res.status(201).json(
+    new ApiResponse(201, null, "Ticket linked to owner app successfully"),
+  );
+}
 
 const parkCarSchema = z.object({
   slot:    z.string().trim().max(60).optional(),
