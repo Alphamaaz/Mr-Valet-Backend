@@ -10,7 +10,7 @@ import { User } from "../models/User.js";
 const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Karachi";
 const MAX_LOCATION_ACCURACY_METERS = Number(process.env.MAX_LOCATION_ACCURACY_METERS || 50);
 const MAX_LOCATION_AGE_SECONDS = Number(process.env.MAX_LOCATION_AGE_SECONDS || 15);
-const DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS = Number(process.env.ATTENDANCE_QR_EXPIRY_SECONDS || 30);
+// const DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS = Number(process.env.ATTENDANCE_QR_EXPIRY_SECONDS || 30); // QR expiry disabled
 
 const attendancePayloadSchema = z.object({
   qrToken: z.string().trim().min(10),
@@ -86,7 +86,7 @@ function buildAttendanceQrToken({ branch, issuedFor, expiresInSeconds }) {
       issuedFor,
     },
     getAttendanceQrSecret(),
-    { expiresIn: expiresInSeconds },
+    {}, // { expiresIn: expiresInSeconds }, // QR expiry disabled
   );
 }
 
@@ -174,15 +174,16 @@ export async function getDynamicAttendanceQrCode(req, res) {
     throw badRequest("Branch is invalid or inactive");
   }
 
-  const expiresInSeconds = Number.isFinite(DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS)
-    && DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS > 0
-    ? DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS
-    : 30;
+  // QR expiry disabled — token does not expire
+  // const expiresInSeconds = Number.isFinite(DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS)
+  //   && DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS > 0
+  //   ? DYNAMIC_ATTENDANCE_QR_EXPIRY_SECONDS
+  //   : 30;
 
   const qrToken = buildAttendanceQrToken({
     branch,
     issuedFor: "DYNAMIC_LOCATION_QR",
-    expiresInSeconds,
+    expiresInSeconds: null,
   });
 
   const qrImageDataUrl = await QRCode.toDataURL(qrToken, {
@@ -192,7 +193,7 @@ export async function getDynamicAttendanceQrCode(req, res) {
   });
 
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + expiresInSeconds * 1000);
+  // const expiresAt = new Date(now.getTime() + expiresInSeconds * 1000); // QR expiry disabled
 
   return res.json(
     new ApiResponse(
@@ -207,9 +208,9 @@ export async function getDynamicAttendanceQrCode(req, res) {
         qrToken,
         qrImageDataUrl,
         issuedAt: now,
-        expiresAt,
-        expiresInSeconds,
-        refreshAfterSeconds: Math.max(expiresInSeconds - 3, 1),
+        // expiresAt,          // QR expiry disabled
+        // expiresInSeconds,   // QR expiry disabled
+        // refreshAfterSeconds: Math.max(expiresInSeconds - 3, 1), // QR expiry disabled
       },
       "Dynamic attendance QR generated successfully",
     ),
