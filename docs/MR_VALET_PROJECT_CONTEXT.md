@@ -113,14 +113,13 @@ Frontend flow:
 
 Backend must not create the final transaction before entry method success.
 
-Current backend alignment:
+Current MVP backend alignment:
 
-- Immediate-success methods use `POST /api/v1/tickets/issue` and create the final ticket immediately.
-- Scan-confirmed methods use pending issue intents:
-- `POST /api/v1/tickets/issue-intents` creates a short-lived pending intent for `QR_CODE` or `WHATSAPP`.
-- `POST /api/v1/tickets/issue-intents/:reference/confirm-app` is called by the owner app after scanning a `QR_CODE` intent and creates the final ticket linked to `ownerUser`.
-- WhatsApp webhook consumes `/park my car <intentReference>` and creates the final ticket linked to the WhatsApp sender phone.
-- Direct `/api/v1/tickets/issue` must reject `QR_CODE` and `WHATSAPP` to prevent premature ticket creation.
+- `POST /api/v1/tickets/issue` creates the final ticket immediately for all supported methods.
+- If `entryMethod` is `QR_CODE`, the response includes an owner-app QR payload containing ticket identity. Owner app scans it and links the logged-in owner through the owner link flow.
+- If `entryMethod` is `WHATSAPP`, the response includes a WhatsApp QR link prefilled with `/park my car <valetCode>`. WhatsApp webhook links the sender phone to the ticket.
+- Other methods do not return QR payload.
+- Post-ticket services/payment are handled by `PATCH /api/v1/tickets/:ticketId/checkout`.
 
 ## Service Types Vs Add-On Services
 

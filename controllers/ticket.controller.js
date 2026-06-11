@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import crypto from "crypto";
+import QRCode from "qrcode";
 import { z } from "zod";
 import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js";
 import { Ticket } from "../models/Ticket.js";
@@ -207,6 +208,33 @@ const recordTicketPaymentSchema = z.object({
   }
 });
 
+const updateTicketCheckoutSchema = z.object({
+  services: z.array(z.string().trim().min(1).max(80)).optional(),
+  paymentCondition: z.enum(PAYMENT_CONDITION_VALUES).optional(),
+  payment: immediatePaymentSchema,
+  notes: z.string().trim().max(300).optional(),
+}).superRefine((data, ctx) => {
+  if (data.paymentCondition === PAYMENT_CONDITIONS.PAY_NOW && !data.payment) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["payment"],
+      message: "payment is required when paymentCondition is PAY_NOW",
+    });
+  }
+
+  if (
+    data.services === undefined
+    && data.paymentCondition === undefined
+    && data.payment === undefined
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["services"],
+      message: "Provide services, paymentCondition, or payment",
+    });
+  }
+});
+
 const keyControllerQueueQuerySchema = z.object({
   status: z.enum([
     TICKET_STATUS.READY_TO_BE_PARKED,
@@ -367,6 +395,20 @@ function buildOwnerMatchFilter(user) {
   return clauses.length === 1 ? clauses[0] : { $or: clauses };
 }
 
+function isTicketOwnedByUser(ticket, user) {
+  if (!ticket || !user) {
+    return false;
+  }
+
+  if (ticket.ownerUser && String(ticket.ownerUser) === String(user.id)) {
+    return true;
+  }
+
+  const ownerPhone = normalizePhone(ticket.ownerPhone);
+  const userPhones = getOwnerPhoneCandidates(user.phone).map((phone) => normalizePhone(phone));
+  return Boolean(ownerPhone && userPhones.includes(ownerPhone));
+}
+
 function matchesTicketSearch(ticket, queryText) {
   if (!queryText) {
     return true;
@@ -462,6 +504,64 @@ function buildTicketSummary(ticket) {
     keyControl: compactKeyControl,
     retrieval,
   };
+}
+
+async function buildTicketIssueResponse(ticket) {
+  const assignedDriver = ticket.assignedDriver
+    ? {
+      id: String(ticket.assignedDriver._id || ticket.assignedDriver),
+      fullName: ticket.assignedDriver.fullName || "",
+      phone: ticket.assignedDriver.phone || "",
+      role: ticket.assignedDriver.role || "",
+    }
+    : null;
+
+  const response = {
+    ticket: {
+      id: String(ticket._id),
+      ticketNumber: ticket.ticketNumber,
+      valetCode: ticket.valetCode,
+      status: ticket.status,
+      entryMethod: ticket.entryMethod || "",
+      serviceType: ticket.serviceType || "",
+      paymentCondition: ticket.paymentCondition || "",
+      services: ticket.services || [],
+      vehicle: ticket.vehicle
+        ? {
+          id: String(ticket.vehicle._id || ticket.vehicle),
+          plate: ticket.vehicle.plate || "",
+          make: ticket.vehicle.make || "",
+          model: ticket.vehicle.model || "",
+          color: ticket.vehicle.color || "",
+          photo: ticket.vehicle.photo || "",
+        }
+        : null,
+      keyTag: ticket.keyTag || "",
+      garage: ticket.garage || "",
+      slot: ticket.slot || "",
+      receivingPoint: ticket.receivingPoint || "",
+      assignedDriver,
+      payment: {
+        amount: ticket.payment?.amount ?? 0,
+        currency: ticket.payment?.currency || "QAR",
+        status: ticket.payment?.status || PAYMENT_STATUS.UNPAID,
+        method: ticket.payment?.method || "",
+      },
+      createdAt: ticket.createdAt,
+    },
+  };
+
+  const qr = buildTicketIssueQrPayload(ticket);
+  if (qr) {
+    qr.imageDataUrl = await QRCode.toDataURL(qr.payload, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 512,
+    });
+    response.qr = qr;
+  }
+
+  return response;
 }
 
 async function getActorTicketIds(userId, dateFilter = null) {
@@ -650,10 +750,31 @@ function buildPaymentLink(ticket) {
 
 function buildOwnerAppScanPayload(ticket) {
   return JSON.stringify({
-    type: "OWNER_REQUEST",
+    type: "OWNER_TICKET_LINK",
+    ticketId: String(ticket._id),
     ticketNumber: ticket.ticketNumber,
     valetCode: ticket.valetCode,
   });
+}
+
+function buildTicketIssueQrPayload(ticket) {
+  if (ticket.entryMethod === ENTRY_METHODS.QR_CODE) {
+    return {
+      type: "OWNER_APP",
+      payload: buildOwnerAppScanPayload(ticket),
+    };
+  }
+
+  if (ticket.entryMethod === ENTRY_METHODS.WHATSAPP) {
+    const { command, link } = buildWhatsAppPrefillLink(ticket.valetCode);
+    return {
+      type: "WHATSAPP",
+      payload: link,
+      command,
+    };
+  }
+
+  return null;
 }
 
 function buildOwnerAppIntentPayload(reference) {
@@ -1611,6 +1732,149 @@ export async function recordTicketPayment(req, res) {
         payment: ticket.payment,
       },
       "Ticket payment updated successfully",
+    ),
+  );
+}
+
+export async function updateTicketCheckout(req, res) {
+  const { ticketId } = req.params;
+  if (!isValidObjectId(ticketId)) {
+    throw badRequest("ticketId must be a valid ObjectId");
+  }
+
+  const parsed = updateTicketCheckoutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const data = parsed.data;
+  const isOwner = req.user?.role === ROLES.OWNER;
+  const isStaff = !isOwner;
+  if (isStaff && (!req.user?.branchId || !isValidObjectId(req.user.branchId))) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const ticketFilter = isOwner
+    ? { _id: ticketId }
+    : { _id: ticketId, branch: req.user.branchId };
+  const ticket = await Ticket.findOne(ticketFilter);
+  if (!ticket) {
+    throw notFound("Ticket not found");
+  }
+
+  if (isOwner && !isTicketOwnedByUser(ticket, req.user)) {
+    throw forbidden("You can update only your own linked ticket");
+  }
+
+  if (isOwner && data.payment) {
+    throw forbidden("Owner payment must be processed through the online payment endpoint, not manual checkout update");
+  }
+
+  if (ticket.status === TICKET_STATUS.CLOSED) {
+    throw conflict("Checkout details cannot be changed after ticket is closed");
+  }
+
+  if (data.paymentCondition) {
+    const branch = await Branch.findOne({ _id: ticket.branch, isActive: true })
+      .select("allowedPaymentConditions")
+      .lean();
+    if (!branch) {
+      throw badRequest("Your branch is invalid or inactive");
+    }
+
+    const allowedPaymentConditions = Array.isArray(branch.allowedPaymentConditions) && branch.allowedPaymentConditions.length
+      ? branch.allowedPaymentConditions
+      : PAYMENT_CONDITION_VALUES;
+    if (!allowedPaymentConditions.includes(data.paymentCondition)) {
+      throw badRequest(`Payment condition ${data.paymentCondition} is not enabled for this branch`, {
+        allowedPaymentConditions,
+      });
+    }
+
+    ticket.paymentCondition = data.paymentCondition;
+  }
+
+  if (data.services !== undefined) {
+    ticket.services = data.services;
+  }
+
+  let paymentLog = null;
+  if (data.payment) {
+    const payment = data.payment;
+    const amount = payment.amount;
+    const receiptLink = payment.receiptLink || ticket.payment?.receiptLink || "";
+    const terminalId = payment.terminalId || ticket.payment?.pos?.terminalId || "";
+    const bankTransactionRef = payment.bankTransactionRef || ticket.payment?.pos?.bankTransactionRef || "";
+
+    ticket.payment = {
+      ...(ticket.payment?.toObject ? ticket.payment.toObject() : ticket.payment || {}),
+      amount,
+      method: payment.method,
+      status: PAYMENT_STATUS.PAID,
+      currency: payment.currency || "QAR",
+      receiptLink,
+      pos: {
+        ...(ticket.payment?.pos?.toObject ? ticket.payment.pos.toObject() : ticket.payment?.pos || {}),
+        terminalId,
+        bankTransactionRef,
+        confirmationStatus: payment.method === "CASH" ? "CASH_RECEIVED" : "MANUALLY_CONFIRMED",
+        confirmedAt: new Date(),
+      },
+      online: {
+        ...(ticket.payment?.online?.toObject ? ticket.payment.online.toObject() : ticket.payment?.online || {}),
+      },
+    };
+
+    paymentLog = {
+      amount,
+      method: payment.method,
+      status: PAYMENT_STATUS.PAID,
+      currency: payment.currency || "QAR",
+      receiptLink,
+      terminalId,
+      bankTransactionRef,
+    };
+  }
+
+  await ticket.save();
+
+  if (paymentLog) {
+    await Payment.create({
+      ticket: ticket._id,
+      amount: paymentLog.amount,
+      method: paymentLog.method,
+      status: paymentLog.status,
+      terminalId: paymentLog.terminalId,
+      bankTransactionRef: paymentLog.bankTransactionRef,
+      receiptLink: paymentLog.receiptLink,
+      processedBy: req.user.id,
+    });
+  }
+
+  await logTicketEvent({
+    ticketId: ticket._id,
+    status: ticket.status,
+    actor: req.user.id,
+    note: data.notes || "Ticket checkout details updated",
+    meta: {
+      services: data.services,
+      paymentCondition: data.paymentCondition,
+      payment: paymentLog
+        ? {
+          amount: paymentLog.amount,
+          method: paymentLog.method,
+          status: paymentLog.status,
+          currency: paymentLog.currency,
+        }
+        : undefined,
+    },
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      null,
+      "Ticket checkout details updated successfully",
     ),
   );
 }
@@ -2750,21 +3014,20 @@ export async function createManualCarArrival(req, res) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }
 
-  if ([ENTRY_METHODS.QR_CODE, ENTRY_METHODS.WHATSAPP].includes(parsed.data.entryMethod)) {
-    throw badRequest(
-      "QR_CODE and WHATSAPP tickets must be started with /api/v1/tickets/issue-intents and created after the guest scan succeeds",
-    );
-  }
-
-  await issueTicketFromPayload({
+  const { ticket } = await issueTicketFromPayload({
     data: parsed.data,
     actorUser: req.user,
   });
 
+  const createdTicket = await Ticket.findById(ticket._id)
+    .populate("vehicle", "plate make model color photo")
+    .populate("assignedDriver", "fullName phone role")
+    .lean();
+
   return res.status(201).json(
     new ApiResponse(
       201,
-      null,
+      await buildTicketIssueResponse(createdTicket || ticket),
       "Ticket issued successfully",
     ),
   );
@@ -2886,8 +3149,17 @@ export async function confirmOwnerAppIssueIntent(req, res) {
   intent.completedAt = new Date();
   await intent.save();
 
+  const createdTicket = await Ticket.findById(ticket._id)
+    .populate("vehicle", "plate make model color photo")
+    .populate("assignedDriver", "fullName phone role")
+    .lean();
+
   return res.status(201).json(
-    new ApiResponse(201, null, "Ticket linked to owner app successfully"),
+    new ApiResponse(
+      201,
+      await buildTicketIssueResponse(createdTicket || ticket),
+      "Ticket linked to owner app successfully",
+    ),
   );
 }
 

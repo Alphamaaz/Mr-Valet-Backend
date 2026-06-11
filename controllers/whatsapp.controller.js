@@ -81,7 +81,7 @@ function extractIncomingMessages(payload) {
 async function sendUsageHelp(phone) {
   await sendWhatsAppTextMessage({
     phone,
-    message: "Use one of these commands:\n/park my car WI-DM-123456\n/request DM-123\nUse the QR code reference for parking and the valet code for retrieval.",
+    message: "Use one of these commands:\n/park my car DM-123\n/request DM-123\nUse the valet code shown on your ticket.",
   });
 }
 

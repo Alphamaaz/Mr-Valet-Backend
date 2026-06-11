@@ -2,9 +2,7 @@ import { Router } from "express";
 import {
   assignDriver,
   claimDamage,
-  confirmOwnerAppIssueIntent,
   createManualCarArrival,
-  createTicketIssueIntent,
   getDamageClaims,
   getKeyControllerQueue,
   getMyAssignedTickets,
@@ -18,6 +16,7 @@ import {
   markKeyReceived,
   releaseKey,
   recordTicketPayment,
+  updateTicketCheckout,
   updateTicketStatus,
   parkCar,
 } from "../controllers/ticket.controller.js";
@@ -104,18 +103,6 @@ router.post(
   asyncHandler(createManualCarArrival),
 );
 
-router.post(
-  "/issue-intents",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
-  asyncHandler(createTicketIssueIntent),
-);
-
-router.post(
-  "/issue-intents/:reference/confirm-app",
-  requireRoles(ROLES.OWNER),
-  asyncHandler(confirmOwnerAppIssueIntent),
-);
-
 router.patch(
   "/:ticketId/assign-driver",
   requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
@@ -126,6 +113,12 @@ router.patch(
   "/:ticketId/payment",
   requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(recordTicketPayment),
+);
+
+router.patch(
+  "/:ticketId/checkout",
+  requireRoles(ROLES.OWNER, ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(updateTicketCheckout),
 );
 
 router.patch(
