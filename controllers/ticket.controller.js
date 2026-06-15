@@ -243,7 +243,6 @@ const keyControllerQueueQuerySchema = z.object({
     TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
     TICKET_STATUS.ON_THE_WAY,
     TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-    TICKET_STATUS.DELIVERED,
   ]).optional(),
   keyStatus: z.enum(["KEY_PENDING", "KEY_RECEIVED"]).optional(),
   keyReleaseStatus: z.enum(["KEY_RELEASE_PENDING", "KEY_RELEASED", "NOT_APPLICABLE"]).optional(),
@@ -258,7 +257,6 @@ const retrievalRequestsQuerySchema = z.object({
     TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
     TICKET_STATUS.ON_THE_WAY,
     TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-    TICKET_STATUS.DELIVERED,
   ]).optional(),
   q: z.string().trim().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -303,7 +301,7 @@ const KEY_HANDOVER_SLA_SECONDS = Number(
   process.env.KEY_HANDOVER_SLA_SECONDS || Number(process.env.KEY_HANDOVER_SLA_MINUTES || 0) * 60 || 90,
 );
 const OWNER_TERMINAL_STATUSES = [
-  TICKET_STATUS.CLOSED,
+  TICKET_STATUS.DELIVERED,
 ];
 
 const processEntryMethodSchema = z.object({
@@ -691,7 +689,7 @@ function buildPaymentRequirement(ticket, stage = "GENERAL") {
     message = "Payment is due now. Show payment options before delivery continues.";
   } else if (isPayLaterDue && stage === "DELIVERY") {
     message = "Collect payment before marking this ticket complete.";
-  } else if (!isResolved && stage === "CLOSE") {
+  } else if (!isResolved && stage === "COMPLETE") {
     message = "Ticket cannot be completed until payment is resolved.";
   }
 
@@ -1069,8 +1067,7 @@ const STATUS_MESSAGES = {
   [TICKET_STATUS.ASSIGNED_FOR_DELIVERY]: "A driver has been assigned to bring your car.",
   [TICKET_STATUS.ON_THE_WAY]:           "Your car is on the way to the receiving point.",
   [TICKET_STATUS.ARRIVED_FOR_DELIVERY]:  "Your car has arrived at the receiving point.",
-  [TICKET_STATUS.DELIVERED]:            "Your car is ready for pickup. Please mark as complete.",
-  [TICKET_STATUS.CLOSED]:               "Your valet ticket is closed.",
+  [TICKET_STATUS.DELIVERED]:            "Your valet ticket is completed. Thank you for using Mr Valet.",
 };
 
 async function emitTicketStatusToOwner({ req, ticket }) {
@@ -1502,8 +1499,8 @@ export async function updateTicketStatus(req, res) {
     throw conflict(`Invalid status transition: ${ticket.status} -> ${nextStatus}`);
   }
 
-  if (nextStatus === TICKET_STATUS.CLOSED && !isTicketPaymentResolved(ticket)) {
-    throw conflict("Ticket cannot be closed until payment is resolved", {
+  if (nextStatus === TICKET_STATUS.DELIVERED && !isTicketPaymentResolved(ticket)) {
+    throw conflict("Ticket cannot be delivered/completed until payment is resolved", {
       currentPaymentStatus: ticket.payment?.status || PAYMENT_STATUS.UNPAID,
       allowedPaymentStatuses: PAYMENT_RESOLVED_STATUSES,
     });
@@ -1607,7 +1604,6 @@ export async function updateTicketStatus(req, res) {
     TICKET_STATUS.DELIVERED,
     TICKET_STATUS.REQUESTED_FOR_DELIVERY,
     TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.CLOSED,
   ];
   if (ownerNotifyStatuses.includes(nextStatus)) {
     void emitTicketStatusToOwner({ req, ticket });
@@ -1646,8 +1642,8 @@ export async function recordTicketPayment(req, res) {
     throw notFound("Ticket not found");
   }
 
-  if (ticket.status === TICKET_STATUS.CLOSED) {
-    throw conflict("Payment cannot be changed after ticket is closed");
+  if (ticket.status === TICKET_STATUS.DELIVERED) {
+    throw conflict("Payment cannot be changed after ticket is delivered/completed");
   }
 
   if (
@@ -1728,7 +1724,7 @@ export async function recordTicketPayment(req, res) {
         ticketId: String(ticket._id),
         ticketNumber: ticket.ticketNumber,
         status: ticket.status,
-        canClose: isTicketPaymentResolved(ticket),
+        canComplete: isTicketPaymentResolved(ticket),
         payment: ticket.payment,
       },
       "Ticket payment updated successfully",
@@ -1770,8 +1766,8 @@ export async function updateTicketCheckout(req, res) {
     throw forbidden("Owner payment must be processed through the online payment endpoint, not manual checkout update");
   }
 
-  if (ticket.status === TICKET_STATUS.CLOSED) {
-    throw conflict("Checkout details cannot be changed after ticket is closed");
+  if (ticket.status === TICKET_STATUS.DELIVERED) {
+    throw conflict("Checkout details cannot be changed after ticket is delivered/completed");
   }
 
   if (data.paymentCondition) {
@@ -2559,7 +2555,6 @@ export async function getKeyControllerQueue(req, res) {
           TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
           TICKET_STATUS.ON_THE_WAY,
           TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-          TICKET_STATUS.DELIVERED,
         ],
       },
   };

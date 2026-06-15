@@ -282,7 +282,7 @@ export async function getFreeDrivers(req, res) {
       {
         $match: {
           branch: branchId,
-          status: { $in: [TICKET_STATUS.DELIVERED, TICKET_STATUS.CLOSED] },
+          status: { $in: [TICKET_STATUS.DELIVERED] },
           updatedAt: { $gte: getTodayStart() },
           $or: [
             { parkingDriver: { $in: driverObjectIds } },

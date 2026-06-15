@@ -12,9 +12,9 @@ Mr. Valet VPMS is a multi-role valet parking management system that controls the
 
 One transaction represents one complete vehicle journey:
 
-`Reception -> Ticket Issued -> Parked -> Retrieval Requested -> Delivery Assigned -> Arrived -> Delivered -> Paid -> Closed`
+`Reception -> Ticket Issued -> Parked -> Retrieval Requested -> Delivery Assigned -> Arrived -> Delivered`
 
-Transactions must start from the Receptionist flow. A transaction cannot be edited or deleted after creation. It cannot be cancelled. It can only be closed after vehicle delivery and payment completion.
+Transactions must start from the Receptionist flow. A transaction cannot be edited or deleted after creation. It cannot be cancelled. It can only be marked delivered/completed after payment completion.
 
 ## Roles
 
@@ -78,7 +78,6 @@ Target statuses:
 5. `ON_THE_WAY`
 6. `ARRIVED_FOR_DELIVERY`
 7. `DELIVERED`
-8. `CLOSED`
 
 Payment status is separate from car status.
 
@@ -91,10 +90,11 @@ Payment statuses:
 - `MEMBERSHIP`
 - `FREE_OF_CHARGE`
 
-Closure rule:
+Completion rule:
 
-- Auto-close only when vehicle status is `DELIVERED` and payment is resolved.
-- Closed transactions are locked and move to history/reporting.
+- `DELIVERED` is the final completed ticket status.
+- Tickets cannot be marked `DELIVERED` until payment is resolved.
+- Delivered transactions are locked and move to history/reporting.
 
 ## Correct Ticket Creation Flow
 
@@ -219,8 +219,8 @@ Client-confirmed PAY_LATER rule:
 
 - When owner sends a retrieval request for a `PAY_LATER` unpaid ticket, frontend must ask/show payment options.
 - At vehicle delivery, Receptionist asks/checks payment again.
-- Vehicle delivery can proceed operationally, but the ticket must not be marked complete/closed until payment is resolved.
-- Backend exposes payment requirement metadata on retrieval/status responses and blocks `CLOSED` unless payment is resolved.
+- Vehicle delivery can proceed operationally, but the ticket must not be marked `DELIVERED` until payment is resolved.
+- Backend exposes payment requirement metadata on retrieval/status responses and blocks `DELIVERED` unless payment is resolved.
 
 POS card flow:
 

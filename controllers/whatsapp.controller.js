@@ -113,7 +113,7 @@ async function findWhatsAppTicketByIdentifier(identifier) {
   return Ticket.findOne({
     vehicle: { $in: vehicleIds },
     ownerType: OWNER_TYPES.WHATSAPP,
-    status: { $ne: TICKET_STATUS.CLOSED },
+    status: { $ne: TICKET_STATUS.DELIVERED },
   })
     .sort({ updatedAt: -1, createdAt: -1 })
     .populate("assignedDriver", "fullName")
