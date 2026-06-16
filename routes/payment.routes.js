@@ -3,6 +3,7 @@ import {
   getPaymentIntentStatus,
   handleSadadCallback,
   initiateSadadPayment,
+  verifySadadPayment,
 } from "../controllers/payment.controller.js";
 import { requireAuth, requireRoles } from "../middleware/auth.js";
 import { ROLES } from "../constants/roles.js";
@@ -16,8 +17,14 @@ router.use(requireAuth);
 
 router.post(
   "/sadad/initiate",
-  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER, ROLES.OWNER),
   asyncHandler(initiateSadadPayment),
+);
+
+router.post(
+  "/sadad/verify",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER, ROLES.OWNER),
+  asyncHandler(verifySadadPayment),
 );
 
 router.get(

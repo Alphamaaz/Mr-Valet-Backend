@@ -57,7 +57,11 @@ const paymentIntentSchema = new mongoose.Schema(
     },
     ticketPayload: {
       type: mongoose.Schema.Types.Mixed,
-      required: true,
+      default: null,
+    },
+    sdkToken: {
+      type: String,
+      default: "",
     },
     providerReference: {
       type: String,
