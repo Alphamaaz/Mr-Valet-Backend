@@ -19,7 +19,7 @@ import { PAYMENT_CONDITIONS, PAYMENT_CONDITION_VALUES } from "../constants/payme
 import { PAYMENT_STATUS, PAYMENT_STATUS_VALUES } from "../constants/paymentStatus.js";
 import { generateTicketNumber, generateValetCode } from "../utils/idGenerator.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
-import { sendTextSms } from "../services/twilio.service.js";
+import { sendTextSms } from "../services/vodafone.service.js";
 
 const PAYMENT_METHOD_VALUES = Object.freeze([
   "CASH",

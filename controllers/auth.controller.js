@@ -4,7 +4,7 @@ import { badRequest, unauthorized } from "../errors/AppError.js";
 import { User } from "../models/User.js";
 import { LoginOtp } from "../models/LoginOtp.js";
 import { signAccessToken } from "../utils/token.js";
-import { sendOtpSms } from "../services/twilio.service.js";
+import { sendOtpSms } from "../services/vodafone.service.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ROLES } from "../constants/roles.js";
 
@@ -107,7 +107,7 @@ export async function requestOtp(req, res) {
   }
 
   const data = {
-    mode: canUseMockOtp() ? "MOCK" : "TWILIO",
+    mode: canUseMockOtp() ? "MOCK" : "VODAFONE",
     expiresInMinutes: OTP_TTL_MINUTES,
   };
 
