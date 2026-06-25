@@ -102,6 +102,19 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    nfcTagUid: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "",
+      index: true,
+    },
+    nfcTag: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "NfcTag",
+      default: null,
+      index: true,
+    },
     serviceType: {
       type: String,
       trim: true,
@@ -319,5 +332,6 @@ ticketSchema.index({ branch: 1, parkingDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, deliveryDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, ownerPhone: 1, status: 1 });
 ticketSchema.index({ branch: 1, paperTicketSerial: 1, status: 1 });
+ticketSchema.index({ branch: 1, nfcTagUid: 1, status: 1 });
 
 export const Ticket = mongoose.model("Ticket", ticketSchema);

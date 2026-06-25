@@ -7,8 +7,11 @@ import {
   getKeyControllerQueue,
   getMyAssignedTickets,
   getOwnerActiveTickets,
+  getPublicRetrievalSummary,
   getTicketHistory,
   requestRetrieval,
+  requestPublicRetrieval,
+  scanNfcForDeparture,
   scanSerializedPaperForDeparture,
   getTicketById,
   linkOwnerToTicket,
@@ -28,6 +31,16 @@ import { uploadDamagePhotos } from "../middleware/uploadDamagePhotos.js";
 import { uploadParkedPhoto } from "../middleware/uploadParkedPhoto.js";
 
 const router = Router();
+
+router.get(
+  "/public/retrieval-summary",
+  asyncHandler(getPublicRetrievalSummary),
+);
+
+router.post(
+  "/public/retrieval-request",
+  asyncHandler(requestPublicRetrieval),
+);
 
 router.use(requireAuth);
 
@@ -90,6 +103,12 @@ router.post(
   "/serialized-paper/departure-scan",
   requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(scanSerializedPaperForDeparture),
+);
+
+router.post(
+  "/nfc/departure-scan",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(scanNfcForDeparture),
 );
 
 router.get(

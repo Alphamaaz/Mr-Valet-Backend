@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js";
@@ -8,6 +9,7 @@ import { TicketEvent } from "../models/TicketEvent.js";
 import { DamageReport } from "../models/DamageReport.js";
 import { Payment } from "../models/Payment.js";
 import { PaperTicket, PAPER_TICKET_STATUS } from "../models/PaperTicket.js";
+import { NfcTag, NFC_TAG_STATUS } from "../models/NfcTag.js";
 import { TicketIssueIntent, TICKET_ISSUE_INTENT_STATUS } from "../models/TicketIssueIntent.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { User } from "../models/User.js";
@@ -66,6 +68,7 @@ const manualCarArrivalSchema = z.object({
   paymentCondition: z.enum(PAYMENT_CONDITION_VALUES).optional(),
   entryMethod: z.enum(ENTRY_METHOD_VALUES),
   paperTicketSerial: z.string().trim().min(2).max(80).optional(),
+  nfcTagUid: z.string().trim().min(2).max(120).optional(),
   driverId: z.string().trim().optional(),
   vehicle: z.object({
     plate: z.string().trim().min(2).max(20),
@@ -104,6 +107,14 @@ const manualCarArrivalSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["paperTicketSerial"],
       message: "paperTicketSerial is required when entryMethod is SERIALIZED_PAPER",
+    });
+  }
+
+  if (data.entryMethod === ENTRY_METHODS.NFC && !data.nfcTagUid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["nfcTagUid"],
+      message: "nfcTagUid is required when entryMethod is NFC",
     });
   }
 });
@@ -335,8 +346,24 @@ const requestRetrievalSchema = z.object({
   notes: z.string().trim().max(500).optional(),
 });
 
+const publicRetrievalSummaryQuerySchema = z.object({
+  token: z.string().trim().min(20),
+});
+
+const publicRetrievalRequestSchema = z.object({
+  token: z.string().trim().min(20),
+  receivingPoint: z.string().trim().min(1).max(80),
+  notes: z.string().trim().max(500).optional(),
+});
+
 const serializedPaperDepartureSchema = z.object({
   serialNumber: z.string().trim().min(2).max(80),
+  receivingPoint: z.string().trim().min(1).max(80),
+  notes: z.string().trim().max(500).optional(),
+});
+
+const nfcDepartureSchema = z.object({
+  nfcTagUid: z.string().trim().min(2).max(120),
   receivingPoint: z.string().trim().min(1).max(80),
   notes: z.string().trim().max(500).optional(),
 });
@@ -402,6 +429,13 @@ function normalizePaperTicketSerial(serialNumber) {
     .toUpperCase();
 }
 
+function normalizeNfcTagUid(tagUid) {
+  return String(tagUid || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toUpperCase();
+}
+
 async function reservePaperTicketSerial({ branchId, serialNumber, ticketId, actorId }) {
   const normalizedSerial = normalizePaperTicketSerial(serialNumber);
   if (!normalizedSerial) {
@@ -438,6 +472,38 @@ async function reservePaperTicketSerial({ branchId, serialNumber, ticketId, acto
     usedBy: actorId || null,
     usedAt: new Date(),
   });
+}
+
+async function reserveNfcTag({ branchId, tagUid, ticketId }) {
+  const normalizedTagUid = normalizeNfcTagUid(tagUid);
+  if (!normalizedTagUid) {
+    throw badRequest("nfcTagUid is required");
+  }
+
+  const tag = await NfcTag.findOne({ branch: branchId, tagUid: normalizedTagUid });
+  if (!tag) {
+    throw notFound("NFC tag is not registered for this branch");
+  }
+
+  if ([NFC_TAG_STATUS.LOST, NFC_TAG_STATUS.INACTIVE, NFC_TAG_STATUS.BLOCKED].includes(tag.status)) {
+    throw conflict(`NFC tag cannot be used while status is ${tag.status}`);
+  }
+
+  if (tag.status === NFC_TAG_STATUS.IN_USE) {
+    throw conflict("NFC tag is already linked to an active ticket", {
+      nfcTagUid: normalizedTagUid,
+      ticketId: tag.ticket ? String(tag.ticket) : null,
+    });
+  }
+
+  tag.status = NFC_TAG_STATUS.IN_USE;
+  tag.ticket = ticketId;
+  tag.usedAt = new Date();
+  tag.lastUsedAt = tag.usedAt;
+  tag.releasedAt = null;
+  tag.statusReason = "";
+  await tag.save();
+  return tag;
 }
 
 function getOwnerPhoneCandidates(phone) {
@@ -557,6 +623,7 @@ function buildTicketSummary(ticket) {
       : null,
     keyTag: ticket.keyTag || "",
     paperTicketSerial: ticket.paperTicketSerial || "",
+    nfcTagUid: ticket.nfcTagUid || "",
     garage: ticket.garage || "",
     slot: ticket.slot || "",
     receivingPoint: ticket.receivingPoint || "",
@@ -612,6 +679,7 @@ async function buildTicketIssueResponse(ticket) {
         : null,
       keyTag: ticket.keyTag || "",
       paperTicketSerial: ticket.paperTicketSerial || "",
+      nfcTagUid: ticket.nfcTagUid || "",
       garage: ticket.garage || "",
       slot: ticket.slot || "",
       receivingPoint: ticket.receivingPoint || "",
@@ -823,6 +891,61 @@ function buildPaymentLink(ticket) {
   return `${normalizedBase}/pay?ticket=${encodeURIComponent(ticket.ticketNumber)}`;
 }
 
+function getPublicRetrievalSecret() {
+  const secret = process.env.PUBLIC_RETRIEVAL_TOKEN_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error("PUBLIC_RETRIEVAL_TOKEN_SECRET or JWT_SECRET is required");
+  }
+
+  return secret;
+}
+
+function buildPublicRetrievalToken(ticket) {
+  return jwt.sign(
+    {
+      purpose: "SMS_RETRIEVAL",
+      ticketId: String(ticket._id),
+      valetCode: ticket.valetCode,
+      ticketNumber: ticket.ticketNumber,
+    },
+    getPublicRetrievalSecret(),
+    {
+      issuer: "mr-valet-api",
+      audience: "mr-valet-public-retrieval",
+    },
+  );
+}
+
+function verifyPublicRetrievalToken(token) {
+  try {
+    const payload = jwt.verify(token, getPublicRetrievalSecret(), {
+      issuer: "mr-valet-api",
+      audience: "mr-valet-public-retrieval",
+    });
+
+    if (payload?.purpose !== "SMS_RETRIEVAL" || !payload?.ticketId) {
+      throw badRequest("Invalid retrieval token");
+    }
+
+    return payload;
+  } catch (error) {
+    if (error?.name === "JsonWebTokenError" || error?.name === "TokenExpiredError" || error?.name === "NotBeforeError") {
+      throw badRequest("Invalid or expired retrieval link");
+    }
+    throw error;
+  }
+}
+
+function buildPublicRetrievalLink(ticket) {
+  const baseUrl = process.env.PUBLIC_RETRIEVAL_BASE_URL || process.env.APP_BASE_URL || "";
+  if (!baseUrl) {
+    return "";
+  }
+
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}token=${encodeURIComponent(buildPublicRetrievalToken(ticket))}`;
+}
+
 function buildOwnerAppScanPayload(ticket) {
   return JSON.stringify({
     type: "OWNER_TICKET_LINK",
@@ -949,20 +1072,39 @@ function buildTicketSmsBody({
   vehicle,
   businessPhone,
   paymentLink,
+  retrievalLink,
 }) {
   const businessContact = businessPhone ? `+${businessPhone}` : "";
   const lines = [
-    `Ticket #${ticket.ticketNumber}`,
+    "Mr Valet Ticket",
+    `Ticket No: ${ticket.ticketNumber}`,
     `Valet Code: ${ticket.valetCode}`,
-    `Plate Number: ${vehicle.plate}`,
+    `Plate: ${vehicle.plate || "N/A"}`,
+    `Vehicle: ${[vehicle.make, vehicle.model].filter(Boolean).join(" ") || "N/A"}`,
+    `Color: ${vehicle.color || "N/A"}`,
   ];
 
+  if (ticket.garage || ticket.slot) {
+    lines.push(`Parking: ${[ticket.garage, ticket.slot].filter(Boolean).join(" - ")}`);
+  }
+  if (ticket.keyTag) {
+    lines.push(`Key Tag: ${ticket.keyTag}`);
+  }
   if (businessContact) {
-    lines.push(`Contact: ${businessContact}`);
+    lines.push(`Support: ${businessContact}`);
   }
   if (paymentLink) {
-    lines.push(`Link: ${paymentLink}`);
+    lines.push("");
+    lines.push("Payment Link:");
+    lines.push(paymentLink);
   }
+  if (retrievalLink) {
+    lines.push("");
+    lines.push("To retrieve your car, please click this link:");
+    lines.push(retrievalLink);
+  }
+  lines.push("");
+  lines.push("Please keep this SMS until your car is delivered.");
 
   return lines.join("\n");
 }
@@ -1121,8 +1263,8 @@ async function emitRetrievalRequestedToOps({
       branchId: String(ticket.branch),
       requestedAt: new Date().toISOString(),
       requestedBy: {
-        id: String(req.user.id),
-        role: req.user.role,
+        id: req.user?.id ? String(req.user.id) : null,
+        role: req.user?.role || "PUBLIC_SMS",
       },
       vehicle: vehicleDetails,
     };
@@ -1452,6 +1594,15 @@ export async function processEntryMethod(req, res) {
       vehicle: vehicleDetails,
       businessPhone,
       paymentLink,
+      retrievalLink: buildPublicRetrievalLink(ticket),
+    });
+
+    console.log("[SMS Ticket] Sending ticket SMS", {
+      to: parsed.data.ownerPhone,
+      ticketId: String(ticket._id),
+      ticketNumber: ticket.ticketNumber,
+      entryMethod: ticket.entryMethod,
+      body: smsBody,
     });
 
     try {
@@ -1666,6 +1817,24 @@ export async function updateTicketStatus(req, res) {
         {
           $set: {
             completedAt: ticket.retrieval.deliveredAt,
+          },
+        },
+      );
+    }
+    if (ticket.entryMethod === ENTRY_METHODS.NFC && ticket.nfcTagUid) {
+      await NfcTag.updateOne(
+        {
+          branch: ticket.branch,
+          tagUid: ticket.nfcTagUid,
+          ticket: ticket._id,
+        },
+        {
+          $set: {
+            status: NFC_TAG_STATUS.AVAILABLE,
+            ticket: null,
+            usedAt: null,
+            releasedAt: ticket.retrieval.deliveredAt,
+            statusReason: "",
           },
         },
       );
@@ -2031,6 +2200,93 @@ export async function requestRetrieval(req, res) {
   );
 }
 
+export async function getPublicRetrievalSummary(req, res) {
+  const parsed = publicRetrievalSummaryQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const tokenPayload = verifyPublicRetrievalToken(parsed.data.token);
+  if (!isValidObjectId(tokenPayload.ticketId)) {
+    throw badRequest("Invalid retrieval token");
+  }
+
+  const ticket = await Ticket.findOne({
+    _id: tokenPayload.ticketId,
+    valetCode: tokenPayload.valetCode,
+    status: { $ne: TICKET_STATUS.DELIVERED },
+  })
+    .populate("vehicle", "plate make model color photo")
+    .populate("assignedDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
+    .lean();
+
+  if (!ticket) {
+    throw notFound("Active ticket not found for this retrieval link");
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticket: buildTicketSummary(ticket),
+        paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
+      },
+      "Retrieval ticket loaded successfully",
+    ),
+  );
+}
+
+export async function requestPublicRetrieval(req, res) {
+  const parsed = publicRetrievalRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const tokenPayload = verifyPublicRetrievalToken(parsed.data.token);
+  if (!isValidObjectId(tokenPayload.ticketId)) {
+    throw badRequest("Invalid retrieval token");
+  }
+
+  const ticket = await Ticket.findOne({
+    _id: tokenPayload.ticketId,
+    valetCode: tokenPayload.valetCode,
+    status: { $ne: TICKET_STATUS.DELIVERED },
+  });
+
+  if (!ticket) {
+    throw notFound("Active ticket not found for this retrieval link");
+  }
+
+  await markRetrievalRequestedOnTicket({
+    ticket,
+    requestedById: null,
+    requestedByRole: "PUBLIC_SMS",
+    receivingPoint: parsed.data.receivingPoint,
+    notes: parsed.data.notes ?? ticket.notes ?? "",
+  });
+
+  void emitRetrievalRequestedToOps({ req, ticket });
+  void emitTicketStatusToOwner({ req, ticket });
+
+  const populatedTicket = await Ticket.findById(ticket._id)
+    .populate("vehicle", "plate make model color photo")
+    .populate("assignedDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
+    .lean();
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticket: buildTicketSummary(populatedTicket || ticket),
+        paymentRequirement: buildPaymentRequirement(populatedTicket || ticket, "RETRIEVAL_REQUEST"),
+      },
+      "Retrieval requested successfully",
+    ),
+  );
+}
+
 export async function scanSerializedPaperForDeparture(req, res) {
   if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
     throw forbidden("User is not assigned to a valid branch");
@@ -2077,6 +2333,56 @@ export async function scanSerializedPaperForDeparture(req, res) {
         paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
       },
       "Serialized paper ticket scanned. Retrieval requested successfully",
+    ),
+  );
+}
+
+export async function scanNfcForDeparture(req, res) {
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const parsed = nfcDepartureSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const nfcTagUid = normalizeNfcTagUid(parsed.data.nfcTagUid);
+  const ticket = await Ticket.findOne({
+    branch: req.user.branchId,
+    entryMethod: ENTRY_METHODS.NFC,
+    nfcTagUid,
+    status: { $ne: TICKET_STATUS.DELIVERED },
+  });
+
+  if (!ticket) {
+    throw notFound("Active ticket not found for this NFC tag");
+  }
+
+  await markRetrievalRequestedOnTicket({
+    ticket,
+    requestedById: req.user.id,
+    requestedByRole: req.user.role,
+    receivingPoint: parsed.data.receivingPoint,
+    notes: parsed.data.notes ?? ticket.notes ?? "",
+  });
+
+  void emitRetrievalRequestedToOps({ req, ticket });
+  void emitTicketStatusToOwner({ req, ticket });
+
+  const populatedTicket = await Ticket.findById(ticket._id)
+    .populate("vehicle", "plate make model color photo")
+    .populate("deliveryDriver", "fullName phone role")
+    .lean();
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticket: buildTicketSummary(populatedTicket || ticket),
+        paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
+      },
+      "NFC tag scanned. Retrieval requested successfully",
     ),
   );
 }
@@ -2989,6 +3295,32 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     }
   }
 
+  const nfcTagUid = entryMethod === ENTRY_METHODS.NFC
+    ? normalizeNfcTagUid(data.nfcTagUid)
+    : "";
+  if (entryMethod === ENTRY_METHODS.NFC) {
+    if (!nfcTagUid) {
+      throw badRequest("nfcTagUid is required when entryMethod is NFC");
+    }
+
+    const nfcTag = await NfcTag.findOne({
+      branch: branch._id,
+      tagUid: nfcTagUid,
+    }).lean();
+    if (!nfcTag) {
+      throw notFound("NFC tag is not registered for this branch");
+    }
+    if ([NFC_TAG_STATUS.LOST, NFC_TAG_STATUS.INACTIVE, NFC_TAG_STATUS.BLOCKED].includes(nfcTag.status)) {
+      throw conflict(`NFC tag cannot be used while status is ${nfcTag.status}`);
+    }
+    if (nfcTag.status === NFC_TAG_STATUS.IN_USE) {
+      throw conflict("NFC tag is already linked to an active ticket", {
+        nfcTagUid,
+        ticketId: nfcTag.ticket ? String(nfcTag.ticket) : null,
+      });
+    }
+  }
+
   let driver = null;
   if (data.driverId) {
     if (!isValidObjectId(data.driverId)) {
@@ -3033,31 +3365,6 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
   });
 
   let smsDelivery = null;
-  if (entryMethod === ENTRY_METHODS.SMS) {
-    const businessPhone = (process.env.WHATSAPP_BUSINESS_PHONE || "").replace(/\D/g, "");
-    const smsBody = buildTicketSmsBody({
-      ticket: tempTicketForDelivery,
-      vehicle: vehicleDetails,
-      businessPhone,
-      paymentLink,
-    });
-
-    try {
-      await sendTextSms({
-        phone: data.ownerPhone,
-        body: smsBody,
-      });
-      smsDelivery = {
-        status: "SENT",
-        to: data.ownerPhone,
-      };
-    } catch (error) {
-      throw badRequest("SMS ticket delivery failed. Ticket was not created.", {
-        to: data.ownerPhone,
-        error: error?.message || "SMS delivery failed",
-      });
-    }
-  }
 
   const paymentSource = verifiedPayment || data.payment;
   const paymentForCreate = paymentSource
@@ -3107,6 +3414,7 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     parkingDriver: driver?._id || null,
     entryMethod,
     paperTicketSerial,
+    nfcTagUid,
     serviceType,
     paymentCondition,
     garage: data.garage || "",
@@ -3120,6 +3428,42 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     createdBy: actorUser.id,
   });
 
+  if (entryMethod === ENTRY_METHODS.SMS) {
+    const businessPhone = (process.env.WHATSAPP_BUSINESS_PHONE || "").replace(/\D/g, "");
+    const smsBody = buildTicketSmsBody({
+      ticket,
+      vehicle: vehicleDetails,
+      businessPhone,
+      paymentLink,
+      retrievalLink: buildPublicRetrievalLink(ticket),
+    });
+
+    console.log("[SMS Ticket] Sending ticket SMS", {
+      to: data.ownerPhone,
+      ticketId: String(ticket._id),
+      ticketNumber: ticket.ticketNumber,
+      entryMethod: ticket.entryMethod,
+      body: smsBody,
+    });
+
+    try {
+      await sendTextSms({
+        phone: data.ownerPhone,
+        body: smsBody,
+      });
+      smsDelivery = {
+        status: "SENT",
+        to: data.ownerPhone,
+      };
+    } catch (error) {
+      smsDelivery = {
+        status: "FAILED",
+        to: data.ownerPhone,
+        error: error?.message || "SMS delivery failed",
+      };
+    }
+  }
+
   if (entryMethod === ENTRY_METHODS.SERIALIZED_PAPER) {
     const paperTicket = await reservePaperTicketSerial({
       branchId: branch._id,
@@ -3128,6 +3472,16 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
       actorId: actorUser.id,
     });
     ticket.paperTicket = paperTicket._id;
+    await ticket.save();
+  }
+
+  if (entryMethod === ENTRY_METHODS.NFC) {
+    const nfcTag = await reserveNfcTag({
+      branchId: branch._id,
+      tagUid: nfcTagUid,
+      ticketId: ticket._id,
+    });
+    ticket.nfcTag = nfcTag._id;
     await ticket.save();
   }
 
@@ -3155,7 +3509,9 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
       paymentCondition,
       entryMethod,
       paperTicketSerial: paperTicketSerial || null,
+      nfcTagUid: nfcTagUid || null,
       driverId: driver ? String(driver._id) : null,
+      smsDelivery,
       paymentStatus: paymentForCreate ? PAYMENT_STATUS.PAID : PAYMENT_STATUS.UNPAID,
     },
   });

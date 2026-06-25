@@ -29,7 +29,9 @@ export function createApp() {
   app.use(morgan("dev"));
   app.use("/public", express.static(path.join(process.cwd(), "public")));
 
-  
+  app.get("/retrieve", (_, res) => {
+    res.sendFile(path.join(process.cwd(), "public", "retrieve", "index.html"));
+  });
   
 
   app.use("/api", apiLimiter, routes);

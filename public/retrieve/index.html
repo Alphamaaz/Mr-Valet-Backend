@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mr Valet - Request Car</title>
+    <link rel="stylesheet" href="/public/retrieve/retrieve.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="card">
+        <div class="brand">
+          <span class="brand-mark">MR</span><span>VALET</span>
+        </div>
+
+        <div id="loading" class="state">Loading ticket...</div>
+        <div id="error" class="state error hidden"></div>
+
+        <div id="content" class="hidden">
+          <p class="eyebrow">Request Car</p>
+          <h1>Your valet ticket</h1>
+
+          <div class="ticket">
+            <div>
+              <span class="label">Ticket</span>
+              <strong id="ticketNumber">-</strong>
+            </div>
+            <div>
+              <span class="label">Status</span>
+              <strong id="ticketStatus">-</strong>
+            </div>
+          </div>
+
+          <div class="vehicle">
+            <p class="label">Vehicle</p>
+            <h2 id="vehicleName">-</h2>
+            <p id="vehicleMeta">-</p>
+          </div>
+
+          <div id="paymentBox" class="payment hidden"></div>
+
+          <form id="retrievalForm">
+            <label for="receivingPoint">Receiving point</label>
+            <select id="receivingPoint" name="receivingPoint" required>
+              <option value="">Select receiving point</option>
+              <option value="Main Entrance">Main Entrance</option>
+              <option value="Exit Gate 1">Exit Gate 1</option>
+              <option value="Lobby">Lobby</option>
+              <option value="VIP Entrance">VIP Entrance</option>
+            </select>
+
+            <label for="notes">Notes (optional)</label>
+            <textarea id="notes" name="notes" rows="3" maxlength="500" placeholder="Example: I am waiting near the main gate"></textarea>
+
+            <button id="submitButton" type="submit">Request My Car</button>
+          </form>
+        </div>
+
+        <div id="success" class="state success hidden">
+          <h1>Request sent</h1>
+          <p>Your retrieval request has been sent to Mr Valet staff.</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/public/retrieve/retrieve.js" defer></script>
+  </body>
+</html>

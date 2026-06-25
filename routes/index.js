@@ -13,6 +13,7 @@ import subscriptionRoutes from "./subscription.routes.js";
 import serviceRoutes from "./service.routes.js";
 import paymentRoutes from "./payment.routes.js";
 import paperTicketRoutes from "./paperTicket.routes.js";
+import nfcTagRoutes from "./nfcTag.routes.js";
 
 const router = Router();
 
@@ -30,5 +31,6 @@ router.use("/v1/subscriptions", subscriptionRoutes);
 router.use("/v1/services", serviceRoutes);
 router.use("/v1/payments", paymentRoutes);
 router.use("/v1/paper-tickets", paperTicketRoutes);
+router.use("/v1/nfc-tags", nfcTagRoutes);
 
 export default router;
