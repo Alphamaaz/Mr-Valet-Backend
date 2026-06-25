@@ -9,6 +9,7 @@ import {
   getOwnerActiveTickets,
   getTicketHistory,
   requestRetrieval,
+  scanSerializedPaperForDeparture,
   getTicketById,
   linkOwnerToTicket,
   listTickets,
@@ -83,6 +84,12 @@ router.get(
     ROLES.OWNER,
   ),
   asyncHandler(getTicketHistory),
+);
+
+router.post(
+  "/serialized-paper/departure-scan",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(scanSerializedPaperForDeparture),
 );
 
 router.get(

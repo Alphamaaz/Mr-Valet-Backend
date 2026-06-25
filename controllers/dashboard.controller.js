@@ -59,7 +59,7 @@ export async function getDashboardStats(req, res) {
   const { start: yStart, end: yEnd } = yesterdayRange();
 
   // ── Shift times from the logged-in user's EmployeeProfile ─────────────────
-  const myProfile = await EmployeeProfile.findOne({ user: req.user._id })
+  const myProfile = await EmployeeProfile.findOne({ user: req.user.id })
     .select("shiftStart shiftEnd")
     .lean();
 

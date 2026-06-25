@@ -7,6 +7,7 @@ import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
 import { DamageReport } from "../models/DamageReport.js";
 import { Payment } from "../models/Payment.js";
+import { PaperTicket, PAPER_TICKET_STATUS } from "../models/PaperTicket.js";
 import { TicketIssueIntent, TICKET_ISSUE_INTENT_STATUS } from "../models/TicketIssueIntent.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { User } from "../models/User.js";
@@ -64,6 +65,7 @@ const manualCarArrivalSchema = z.object({
   serviceType: z.string().trim().min(1).max(60).optional(),
   paymentCondition: z.enum(PAYMENT_CONDITION_VALUES).optional(),
   entryMethod: z.enum(ENTRY_METHOD_VALUES),
+  paperTicketSerial: z.string().trim().min(2).max(80).optional(),
   driverId: z.string().trim().optional(),
   vehicle: z.object({
     plate: z.string().trim().min(2).max(20),
@@ -94,6 +96,14 @@ const manualCarArrivalSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["payment"],
       message: "payment is required when paymentCondition is PAY_NOW",
+    });
+  }
+
+  if (data.entryMethod === ENTRY_METHODS.SERIALIZED_PAPER && !data.paperTicketSerial) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["paperTicketSerial"],
+      message: "paperTicketSerial is required when entryMethod is SERIALIZED_PAPER",
     });
   }
 });
@@ -325,6 +335,26 @@ const requestRetrievalSchema = z.object({
   notes: z.string().trim().max(500).optional(),
 });
 
+const serializedPaperDepartureSchema = z.object({
+  serialNumber: z.string().trim().min(2).max(80),
+  receivingPoint: z.string().trim().min(1).max(80),
+  notes: z.string().trim().max(500).optional(),
+});
+
+const paperTicketBulkCreateSchema = z.object({
+  serialNumbers: z.array(z.string().trim().min(2).max(80)).min(1).max(1000),
+});
+
+const paperTicketListQuerySchema = z.object({
+  status: z.enum(Object.values(PAPER_TICKET_STATUS)).optional(),
+  q: z.string().trim().max(80).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+const paperTicketVoidSchema = z.object({
+  reason: z.string().trim().min(1).max(300),
+});
+
 function isValidObjectId(value) {
   return mongoose.Types.ObjectId.isValid(value);
 }
@@ -363,6 +393,51 @@ function normalizeStringArray(input) {
 
 function normalizePhone(phone) {
   return String(phone || "").replace(/\D/g, "");
+}
+
+function normalizePaperTicketSerial(serialNumber) {
+  return String(serialNumber || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .toUpperCase();
+}
+
+async function reservePaperTicketSerial({ branchId, serialNumber, ticketId, actorId }) {
+  const normalizedSerial = normalizePaperTicketSerial(serialNumber);
+  if (!normalizedSerial) {
+    throw badRequest("paperTicketSerial is required");
+  }
+
+  const existing = await PaperTicket.findOne({ branch: branchId, serialNumber: normalizedSerial });
+  if (existing) {
+    if (existing.status === PAPER_TICKET_STATUS.VOIDED) {
+      throw conflict("This paper ticket serial is voided and cannot be used");
+    }
+
+    if (existing.status === PAPER_TICKET_STATUS.USED) {
+      throw conflict("This paper ticket serial is already linked to a ticket", {
+        serialNumber: normalizedSerial,
+        ticketId: existing.ticket ? String(existing.ticket) : null,
+      });
+    }
+
+    existing.status = PAPER_TICKET_STATUS.USED;
+    existing.ticket = ticketId;
+    existing.usedBy = actorId || null;
+    existing.usedAt = new Date();
+    await existing.save();
+    return existing;
+  }
+
+  return PaperTicket.create({
+    branch: branchId,
+    serialNumber: normalizedSerial,
+    status: PAPER_TICKET_STATUS.USED,
+    ticket: ticketId,
+    registeredBy: actorId || null,
+    usedBy: actorId || null,
+    usedAt: new Date(),
+  });
 }
 
 function getOwnerPhoneCandidates(phone) {
@@ -481,6 +556,7 @@ function buildTicketSummary(ticket) {
       }
       : null,
     keyTag: ticket.keyTag || "",
+    paperTicketSerial: ticket.paperTicketSerial || "",
     garage: ticket.garage || "",
     slot: ticket.slot || "",
     receivingPoint: ticket.receivingPoint || "",
@@ -535,6 +611,7 @@ async function buildTicketIssueResponse(ticket) {
         }
         : null,
       keyTag: ticket.keyTag || "",
+      paperTicketSerial: ticket.paperTicketSerial || "",
       garage: ticket.garage || "",
       slot: ticket.slot || "",
       receivingPoint: ticket.receivingPoint || "",
@@ -1579,6 +1656,20 @@ export async function updateTicketStatus(req, res) {
       ...(ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || {}),
       deliveredAt: new Date(),
     };
+    if (ticket.entryMethod === ENTRY_METHODS.SERIALIZED_PAPER && ticket.paperTicketSerial) {
+      await PaperTicket.updateOne(
+        {
+          branch: ticket.branch,
+          serialNumber: ticket.paperTicketSerial,
+          ticket: ticket._id,
+        },
+        {
+          $set: {
+            completedAt: ticket.retrieval.deliveredAt,
+          },
+        },
+      );
+    }
   }
   if (parsed.data.slot !== undefined) ticket.slot = parsed.data.slot;
   if (parsed.data.garage !== undefined) ticket.garage = parsed.data.garage;
@@ -1936,6 +2027,56 @@ export async function requestRetrieval(req, res) {
         paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
       },
       "Retrieval requested successfully",
+    ),
+  );
+}
+
+export async function scanSerializedPaperForDeparture(req, res) {
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const parsed = serializedPaperDepartureSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const serialNumber = normalizePaperTicketSerial(parsed.data.serialNumber);
+  const ticket = await Ticket.findOne({
+    branch: req.user.branchId,
+    entryMethod: ENTRY_METHODS.SERIALIZED_PAPER,
+    paperTicketSerial: serialNumber,
+    status: { $ne: TICKET_STATUS.DELIVERED },
+  });
+
+  if (!ticket) {
+    throw notFound("Active ticket not found for this serialized paper ticket");
+  }
+
+  await markRetrievalRequestedOnTicket({
+    ticket,
+    requestedById: req.user.id,
+    requestedByRole: req.user.role,
+    receivingPoint: parsed.data.receivingPoint,
+    notes: parsed.data.notes ?? ticket.notes ?? "",
+  });
+
+  void emitRetrievalRequestedToOps({ req, ticket });
+  void emitTicketStatusToOwner({ req, ticket });
+
+  const populatedTicket = await Ticket.findById(ticket._id)
+    .populate("vehicle", "plate make model color photo")
+    .populate("deliveryDriver", "fullName phone role")
+    .lean();
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticket: buildTicketSummary(populatedTicket || ticket),
+        paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
+      },
+      "Serialized paper ticket scanned. Retrieval requested successfully",
     ),
   );
 }
@@ -2825,6 +2966,29 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     });
   }
 
+  const paperTicketSerial = entryMethod === ENTRY_METHODS.SERIALIZED_PAPER
+    ? normalizePaperTicketSerial(data.paperTicketSerial)
+    : "";
+  if (entryMethod === ENTRY_METHODS.SERIALIZED_PAPER) {
+    if (!paperTicketSerial) {
+      throw badRequest("paperTicketSerial is required when entryMethod is SERIALIZED_PAPER");
+    }
+
+    const paperTicket = await PaperTicket.findOne({
+      branch: branch._id,
+      serialNumber: paperTicketSerial,
+    }).lean();
+    if (paperTicket?.status === PAPER_TICKET_STATUS.VOIDED) {
+      throw conflict("This paper ticket serial is voided and cannot be used");
+    }
+    if (paperTicket?.status === PAPER_TICKET_STATUS.USED) {
+      throw conflict("This paper ticket serial is already linked to a ticket", {
+        serialNumber: paperTicketSerial,
+        ticketId: paperTicket.ticket ? String(paperTicket.ticket) : null,
+      });
+    }
+  }
+
   let driver = null;
   if (data.driverId) {
     if (!isValidObjectId(data.driverId)) {
@@ -2942,6 +3106,7 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     assignedDriver: driver?._id || null,
     parkingDriver: driver?._id || null,
     entryMethod,
+    paperTicketSerial,
     serviceType,
     paymentCondition,
     garage: data.garage || "",
@@ -2954,6 +3119,17 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
     ...(paymentForCreate ? { payment: paymentForCreate } : {}),
     createdBy: actorUser.id,
   });
+
+  if (entryMethod === ENTRY_METHODS.SERIALIZED_PAPER) {
+    const paperTicket = await reservePaperTicketSerial({
+      branchId: branch._id,
+      serialNumber: paperTicketSerial,
+      ticketId: ticket._id,
+      actorId: actorUser.id,
+    });
+    ticket.paperTicket = paperTicket._id;
+    await ticket.save();
+  }
 
   if (paymentForCreate) {
     await Payment.create({
@@ -2978,6 +3154,7 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
       serviceType,
       paymentCondition,
       entryMethod,
+      paperTicketSerial: paperTicketSerial || null,
       driverId: driver ? String(driver._id) : null,
       paymentStatus: paymentForCreate ? PAYMENT_STATUS.PAID : PAYMENT_STATUS.UNPAID,
     },

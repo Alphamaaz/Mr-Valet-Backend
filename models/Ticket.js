@@ -89,6 +89,19 @@ const ticketSchema = new mongoose.Schema(
       default: undefined,
       index: true,
     },
+    paperTicketSerial: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "",
+      index: true,
+    },
+    paperTicket: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PaperTicket",
+      default: null,
+      index: true,
+    },
     serviceType: {
       type: String,
       trim: true,
@@ -305,5 +318,6 @@ ticketSchema.index({ branch: 1, assignedDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, parkingDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, deliveryDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, ownerPhone: 1, status: 1 });
+ticketSchema.index({ branch: 1, paperTicketSerial: 1, status: 1 });
 
 export const Ticket = mongoose.model("Ticket", ticketSchema);

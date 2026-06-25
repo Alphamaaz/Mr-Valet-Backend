@@ -3,7 +3,7 @@ import { z } from "zod";
 import { badRequest, unauthorized } from "../errors/AppError.js";
 import { User } from "../models/User.js";
 import { LoginOtp } from "../models/LoginOtp.js";
-import { signAccessToken } from "../utils/token.js";
+import { signAccessToken, verifyAccessToken } from "../utils/token.js";
 import { sendOtpSms } from "../services/vodafone.service.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ROLES } from "../constants/roles.js";
@@ -166,12 +166,16 @@ export async function verifyOtp(req, res) {
     phone: user.phone,
     branchId: user.branch ? String(user.branch) : null,
   });
+  const tokenPayload = verifyAccessToken(accessToken);
 
   return res.json(
     new ApiResponse(
       200,
       {
         token: accessToken,
+        tokenType: "Bearer",
+        expiresAt: new Date(tokenPayload.exp * 1000).toISOString(),
+        expiresInSeconds: tokenPayload.exp - Math.floor(Date.now() / 1000),
         user: safeUserResponse(user),
       },
       "Login successful",
