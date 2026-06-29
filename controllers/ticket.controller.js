@@ -463,15 +463,7 @@ async function reservePaperTicketSerial({ branchId, serialNumber, ticketId, acto
     return existing;
   }
 
-  return PaperTicket.create({
-    branch: branchId,
-    serialNumber: normalizedSerial,
-    status: PAPER_TICKET_STATUS.USED,
-    ticket: ticketId,
-    registeredBy: actorId || null,
-    usedBy: actorId || null,
-    usedAt: new Date(),
-  });
+  throw notFound("This paper ticket serial is not registered for this branch");
 }
 
 async function reserveNfcTag({ branchId, tagUid, ticketId }) {
@@ -3284,6 +3276,9 @@ export async function issueTicketFromPayload({ data, actorUser, verifiedPayment 
       branch: branch._id,
       serialNumber: paperTicketSerial,
     }).lean();
+    if (!paperTicket) {
+      throw notFound("This paper ticket serial is not registered for this branch");
+    }
     if (paperTicket?.status === PAPER_TICKET_STATUS.VOIDED) {
       throw conflict("This paper ticket serial is voided and cannot be used");
     }
