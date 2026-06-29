@@ -8,12 +8,15 @@ import { Ticket } from "../models/Ticket.js";
 import { TicketEvent } from "../models/TicketEvent.js";
 import { DamageReport } from "../models/DamageReport.js";
 import { Payment } from "../models/Payment.js";
+import { PaymentIntent, PAYMENT_INTENT_PURPOSE, PAYMENT_INTENT_STATUS } from "../models/PaymentIntent.js";
 import { PaperTicket, PAPER_TICKET_STATUS } from "../models/PaperTicket.js";
 import { NfcTag, NFC_TAG_STATUS } from "../models/NfcTag.js";
+import { TicketRating, TIP_TARGETS } from "../models/TicketRating.js";
 import { TicketIssueIntent, TICKET_ISSUE_INTENT_STATUS } from "../models/TicketIssueIntent.js";
 import { Vehicle } from "../models/Vehicle.js";
 import { User } from "../models/User.js";
 import { Branch } from "../models/Branch.js";
+import { EmployeeProfile } from "../models/EmployeeProfile.js";
 import { OWNER_TYPES } from "../constants/ownerTypes.js";
 import { ROLES } from "../constants/roles.js";
 import { TICKET_STATUS, canTransitionStatus } from "../constants/ticketStatus.js";
@@ -344,6 +347,14 @@ const processEntryMethodSchema = z.object({
 const requestRetrievalSchema = z.object({
   receivingPoint: z.string().trim().min(1).max(80),
   notes: z.string().trim().max(500).optional(),
+});
+
+const rateTicketDriverSchema = z.object({
+  rating: z.coerce.number().min(1).max(5),
+  comment: z.string().trim().max(500).optional(),
+  tipAmount: z.coerce.number().min(0).default(0),
+  tipTarget: z.enum(Object.values(TIP_TARGETS)).default(TIP_TARGETS.DRIVER),
+  currency: z.string().trim().min(3).max(3).default("QAR"),
 });
 
 const publicRetrievalSummaryQuerySchema = z.object({
@@ -881,6 +892,78 @@ function buildPaymentLink(ticket) {
 
   const normalizedBase = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
   return `${normalizedBase}/pay?ticket=${encodeURIComponent(ticket.ticketNumber)}`;
+}
+
+function buildTipPaymentReference() {
+  return `MRV-TIP-${Date.now()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+}
+
+function getSadadTokenUrl() {
+  if (process.env.SADAD_TOKEN_URL) {
+    return process.env.SADAD_TOKEN_URL;
+  }
+
+  return process.env.SADAD_ENVIRONMENT === "production"
+    ? "https://api.sadadqatar.com/api-v4/userbusinesses/getsdktoken"
+    : "https://api.sadadqatar.com/api-v5/userbusinesses/getsdktoken";
+}
+
+async function generateSadadSdkTokenForTip() {
+  const sadadId = process.env.SADAD_MERCHANT_ID || "";
+  const secretKey = process.env.SADAD_SECRET_KEY || "";
+  const domain = process.env.SADAD_REGISTERED_DOMAIN || "";
+  if (!sadadId || !secretKey || !domain) {
+    throw conflict("SADAD credentials are not configured");
+  }
+
+  const { default: axios } = await import("axios");
+  const response = await axios.post(
+    getSadadTokenUrl(),
+    {
+      sadadId,
+      secretKey,
+      domain,
+      ...(process.env.SADAD_ENVIRONMENT !== "production" ? { isTest: true } : {}),
+    },
+    {
+      timeout: Number(process.env.SADAD_TOKEN_TIMEOUT_MS || 10000),
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+
+  const token = response.data?.accessToken || response.data?.data?.accessToken || response.data?.token || "";
+  if (!token) {
+    throw badRequest("SADAD token response did not include accessToken", response.data);
+  }
+
+  return token;
+}
+
+function buildFlutterTipPaymentPayload({ intent, ticket, driver }) {
+  return {
+    orderId: intent.reference,
+    productDetail: [
+      {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        valetCode: ticket.valetCode,
+        driverId: driver ? String(driver._id || driver) : "",
+        type: "TIP",
+      },
+    ],
+    customerName: ticket.ownerName || "Mr Valet Customer",
+    amount: intent.amount,
+    email: "",
+    mobile: ticket.ownerPhone || "",
+    token: intent.sdkToken,
+    packageMode: process.env.SADAD_ENVIRONMENT === "production" ? "live" : "debug",
+    merchantSadadId: process.env.SADAD_MERCHANT_ID || "",
+    isWalletEnabled: true,
+    paymentTypes: ["creditCard", "debitCard", "sadadPay"],
+    titleText: "Mr Valet Driver Tip",
+    googleMerchantID: process.env.SADAD_GOOGLE_MERCHANT_ID || "123456789",
+    googleMerchantName: process.env.SADAD_GOOGLE_MERCHANT_NAME || "Mr Valet",
+  };
 }
 
 function getPublicRetrievalSecret() {
@@ -2188,6 +2271,149 @@ export async function requestRetrieval(req, res) {
         paymentRequirement: buildPaymentRequirement(ticket, "RETRIEVAL_REQUEST"),
       },
       "Retrieval requested successfully",
+    ),
+  );
+}
+
+export async function rateTicketDriver(req, res) {
+  const { ticketId } = req.params;
+  if (!isValidObjectId(ticketId)) {
+    throw badRequest("ticketId must be a valid ObjectId");
+  }
+
+  const parsed = rateTicketDriverSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid request payload", parsed.error.flatten());
+  }
+
+  const ticket = await Ticket.findById(ticketId)
+    .populate("vehicle", "plate make model color photo")
+    .populate("deliveryDriver", "fullName phone role")
+    .populate("assignedDriver", "fullName phone role");
+
+  if (!ticket) {
+    throw notFound("Ticket not found");
+  }
+
+  if (req.user.role !== ROLES.OWNER || !isTicketOwnedByUser(ticket, req.user)) {
+    throw forbidden("Only the ticket owner can rate this driver");
+  }
+
+  if (ticket.status !== TICKET_STATUS.DELIVERED) {
+    throw conflict("Driver can only be rated after the ticket is delivered");
+  }
+
+  const driver = ticket.deliveryDriver || ticket.assignedDriver || ticket.parkingDriver;
+  if (!driver) {
+    throw conflict("No driver is linked to this delivered ticket");
+  }
+
+  const existingRating = await TicketRating.findOne({ ticket: ticket._id }).lean();
+  if (existingRating) {
+    throw conflict("This ticket has already been rated");
+  }
+
+  const { rating, comment, tipAmount, tipTarget, currency } = parsed.data;
+  const ratingDoc = await TicketRating.create({
+    ticket: ticket._id,
+    branch: ticket.branch,
+    driver: driver._id || driver,
+    owner: req.user.id,
+    ownerPhone: req.user.phone || ticket.ownerPhone || "",
+    rating,
+    comment: comment || "",
+    tipAmount,
+    tipTarget,
+    tipPaymentStatus: tipAmount > 0 ? "PENDING" : "NOT_REQUIRED",
+  });
+
+  let profile = await EmployeeProfile.findOne({ user: driver._id || driver });
+  if (!profile) {
+    const { generateEmployeeId } = await import("../utils/idGenerator.js");
+    profile = await EmployeeProfile.create({
+      user: driver._id || driver,
+      employeeId: await generateEmployeeId(),
+    });
+  }
+
+  const previousCount = profile.ratingCount || 0;
+  const previousRating = profile.rating || 0;
+  profile.rating = Number((((previousRating * previousCount) + rating) / (previousCount + 1)).toFixed(2));
+  profile.ratingCount = previousCount + 1;
+  await profile.save();
+
+  let tipPayment = null;
+  if (tipAmount > 0) {
+    let sdkToken = "";
+    try {
+      sdkToken = await generateSadadSdkTokenForTip();
+    } catch (error) {
+      throw badRequest("Unable to generate SADAD SDK token for tip", {
+        message: error?.response?.data?.message || error?.message || "SADAD token request failed",
+        status: error?.response?.status || null,
+        data: error?.response?.data || null,
+      });
+    }
+
+    const intent = await PaymentIntent.create({
+      reference: buildTipPaymentReference(),
+      provider: "SADAD",
+      status: PAYMENT_INTENT_STATUS.PENDING,
+      purpose: PAYMENT_INTENT_PURPOSE.TIP,
+      amount: tipAmount,
+      currency,
+      branch: ticket.branch,
+      createdBy: req.user.id,
+      ticket: ticket._id,
+      sdkToken,
+      expiresAt: new Date(Date.now() + Number(process.env.PAYMENT_INTENT_TTL_MINUTES || 30) * 60 * 1000),
+      tip: {
+        target: tipTarget,
+        driver: driver._id || driver,
+        rating: ratingDoc._id,
+      },
+    });
+
+    ratingDoc.tipPaymentIntent = intent._id;
+    await ratingDoc.save();
+
+    tipPayment = {
+      paymentIntentId: String(intent._id),
+      reference: intent.reference,
+      orderId: intent.reference,
+      provider: intent.provider,
+      amount: intent.amount,
+      currency: intent.currency,
+      sdkToken: intent.sdkToken,
+      flutterPayment: buildFlutterTipPaymentPayload({ intent, ticket, driver }),
+      merchantId: process.env.SADAD_MERCHANT_ID || "",
+      callbackUrl: process.env.SADAD_CALLBACK_URL || "",
+      status: intent.status,
+      expiresAt: intent.expiresAt,
+    };
+  }
+
+  return res.status(201).json(
+    new ApiResponse(
+      201,
+      {
+        rating: {
+          id: String(ratingDoc._id),
+          ticketId: String(ticket._id),
+          driverId: String(driver._id || driver),
+          rating: ratingDoc.rating,
+          comment: ratingDoc.comment,
+          driverAverageRating: profile.rating,
+          driverRatingCount: profile.ratingCount,
+          tipAmount: ratingDoc.tipAmount,
+          tipTarget: ratingDoc.tipTarget,
+          tipPaymentStatus: ratingDoc.tipPaymentStatus,
+        },
+        tipPayment,
+      },
+      tipPayment
+        ? "Driver rated. Complete tip payment to send the tip."
+        : "Driver rated successfully",
     ),
   );
 }

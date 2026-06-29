@@ -6,6 +6,10 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { Attendance } from "../models/Attendance.js";
 import { Branch } from "../models/Branch.js";
 import { User } from "../models/User.js";
+import {
+  autoCheckoutStaleAttendances,
+  getAttendanceDateKey,
+} from "../services/attendance.service.js";
 
 const ATTENDANCE_TIMEZONE = process.env.ATTENDANCE_TIMEZONE || "Asia/Karachi";
 const MAX_LOCATION_ACCURACY_METERS = Number(process.env.MAX_LOCATION_ACCURACY_METERS || 50);
@@ -31,15 +35,6 @@ function getAttendanceQrSecret() {
     throw new Error("ATTENDANCE_QR_SECRET or JWT_SECRET is required");
   }
   return secret;
-}
-
-function getDateKey(date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: ATTENDANCE_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
 }
 
 function getDistanceMeters(from, to) {
@@ -225,11 +220,13 @@ export async function scanAttendance(req, res) {
 
   const payload = parsed.data;
   const { branch, distanceMeters } = await validateAttendanceScan(req, payload);
-  const dateKey = getDateKey(new Date());
+  await autoCheckoutStaleAttendances({ userId: req.user.id });
+  const dateKey = getAttendanceDateKey(new Date());
 
   const activeAttendance = await Attendance.findOne({
     user: req.user.id,
     status: "ACTIVE",
+    dateKey,
   });
 
   if (activeAttendance) {
@@ -301,7 +298,8 @@ export async function scanAttendance(req, res) {
 }
 
 export async function getMyAttendanceStatus(req, res) {
-  const todayDateKey = getDateKey(new Date());
+  await autoCheckoutStaleAttendances({ userId: req.user.id });
+  const todayDateKey = getAttendanceDateKey(new Date());
 
   const todayAttendance = await Attendance.findOne({
     user: req.user.id,

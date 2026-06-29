@@ -8,6 +8,11 @@ export const PAYMENT_INTENT_STATUS = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
+export const PAYMENT_INTENT_PURPOSE = Object.freeze({
+  TICKET_PAYMENT: "TICKET_PAYMENT",
+  TIP: "TIP",
+});
+
 const paymentIntentSchema = new mongoose.Schema(
   {
     reference: {
@@ -32,6 +37,12 @@ const paymentIntentSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
+    },
+    purpose: {
+      type: String,
+      enum: Object.values(PAYMENT_INTENT_PURPOSE),
+      default: PAYMENT_INTENT_PURPOSE.TICKET_PAYMENT,
+      index: true,
     },
     currency: {
       type: String,
@@ -58,6 +69,25 @@ const paymentIntentSchema = new mongoose.Schema(
     ticketPayload: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
+    },
+    tip: {
+      target: {
+        type: String,
+        enum: ["DRIVER", "WHOLE_TEAM", ""],
+        default: "",
+      },
+      driver: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+        index: true,
+      },
+      rating: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "TicketRating",
+        default: null,
+        index: true,
+      },
     },
     sdkToken: {
       type: String,

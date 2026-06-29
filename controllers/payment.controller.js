@@ -4,9 +4,10 @@ import mongoose from "mongoose";
 import { z } from "zod";
 import { badRequest, conflict, forbidden, notFound } from "../errors/AppError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
-import { PaymentIntent, PAYMENT_INTENT_STATUS } from "../models/PaymentIntent.js";
+import { PaymentIntent, PAYMENT_INTENT_PURPOSE, PAYMENT_INTENT_STATUS } from "../models/PaymentIntent.js";
 import { Ticket } from "../models/Ticket.js";
 import { Payment } from "../models/Payment.js";
+import { TicketRating } from "../models/TicketRating.js";
 import { ROLES } from "../constants/roles.js";
 import { PAYMENT_STATUS } from "../constants/paymentStatus.js";
 
@@ -201,6 +202,33 @@ function buildFlutterPaymentPayload({ intent, ticket }) {
   };
 }
 
+function buildFlutterTipPaymentPayload({ intent, ticket }) {
+  return {
+    orderId: intent.reference,
+    productDetail: [
+      {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        valetCode: ticket.valetCode,
+        type: "TIP",
+        tipTarget: intent.tip?.target || "",
+      },
+    ],
+    customerName: ticket.ownerName || "Mr Valet Customer",
+    amount: intent.amount,
+    email: "",
+    mobile: ticket.ownerPhone || "",
+    token: intent.sdkToken,
+    packageMode: process.env.SADAD_ENVIRONMENT === "production" ? "live" : "debug",
+    merchantSadadId: process.env.SADAD_MERCHANT_ID || "",
+    isWalletEnabled: true,
+    paymentTypes: ["creditCard", "debitCard", "sadadPay"],
+    titleText: "Mr Valet Driver Tip",
+    googleMerchantID: process.env.SADAD_GOOGLE_MERCHANT_ID || "123456789",
+    googleMerchantName: process.env.SADAD_GOOGLE_MERCHANT_NAME || "Mr Valet",
+  };
+}
+
 function userCanAccessTicket(ticket, user) {
   if (!ticket || !user) {
     return false;
@@ -248,6 +276,12 @@ async function applySuccessfulSadadPayment({ intent, payload }) {
     intent.failureReason = callbackStatus || "Payment failed";
     intent.callbackPayload = payload;
     await intent.save();
+    if (intent.purpose === PAYMENT_INTENT_PURPOSE.TIP && intent.tip?.rating) {
+      await TicketRating.updateOne(
+        { _id: intent.tip.rating },
+        { $set: { tipPaymentStatus: "FAILED", tipPaymentIntent: intent._id } },
+      );
+    }
     return intent;
   }
 
@@ -265,6 +299,36 @@ async function applySuccessfulSadadPayment({ intent, payload }) {
 
   const providerReference = payload.providerReference || payload.transactionno || payload.transactionId || payload["transaction id"] || intent.reference;
   const paidAt = new Date();
+
+  if (intent.purpose === PAYMENT_INTENT_PURPOSE.TIP) {
+    await TicketRating.updateOne(
+      { _id: intent.tip?.rating },
+      {
+        $set: {
+          tipPaymentStatus: "PAID",
+          tipPaymentIntent: intent._id,
+        },
+      },
+    );
+
+    await Payment.create({
+      ticket: ticket._id,
+      amount: intent.amount,
+      method: "ONLINE",
+      status: PAYMENT_STATUS.PAID,
+      providerReference,
+      processedBy: intent.createdBy,
+    });
+
+    intent.status = PAYMENT_INTENT_STATUS.PAID;
+    intent.providerReference = providerReference;
+    intent.providerTransactionId = payload.transactionId || payload.transactionno || payload["transaction id"] || "";
+    intent.callbackPayload = payload;
+    intent.paidAt = paidAt;
+    await intent.save();
+
+    return intent;
+  }
 
   ticket.payment = {
     ...(ticket.payment?.toObject ? ticket.payment.toObject() : ticket.payment || {}),
@@ -337,6 +401,7 @@ export async function initiateSadadPayment(req, res) {
   const existingIntent = await PaymentIntent.findOne({
     ticket: ticket._id,
     provider: "SADAD",
+    purpose: PAYMENT_INTENT_PURPOSE.TICKET_PAYMENT,
     status: PAYMENT_INTENT_STATUS.PENDING,
     expiresAt: { $gt: new Date() },
   }).sort({ createdAt: -1 });
@@ -357,6 +422,7 @@ export async function initiateSadadPayment(req, res) {
           merchantId: process.env.SADAD_MERCHANT_ID || "",
           callbackUrl: process.env.SADAD_CALLBACK_URL || "",
           status: existingIntent.status,
+          purpose: existingIntent.purpose,
           ticketId: String(ticket._id),
           expiresAt: existingIntent.expiresAt,
         },
@@ -382,6 +448,7 @@ export async function initiateSadadPayment(req, res) {
     reference,
     provider: "SADAD",
     status: PAYMENT_INTENT_STATUS.PENDING,
+    purpose: PAYMENT_INTENT_PURPOSE.TICKET_PAYMENT,
     amount,
     currency,
     branch: ticket.branch,
@@ -406,6 +473,7 @@ export async function initiateSadadPayment(req, res) {
         merchantId: process.env.SADAD_MERCHANT_ID || "",
         callbackUrl: process.env.SADAD_CALLBACK_URL || "",
         status: intent.status,
+        purpose: intent.purpose,
         ticketId: String(ticket._id),
         expiresAt: intent.expiresAt,
       },
@@ -464,6 +532,7 @@ export async function verifySadadPayment(req, res) {
         paymentIntentId: String(updatedIntent._id),
         reference: updatedIntent.reference,
         status: updatedIntent.status,
+        purpose: updatedIntent.purpose,
         ticketId: String(updatedIntent.ticket),
         providerReference: updatedIntent.providerReference || "",
         paidAt: updatedIntent.paidAt,
@@ -524,9 +593,17 @@ export async function getPaymentIntentStatus(req, res) {
         orderId: intent.reference,
         provider: intent.provider,
         status: intent.status,
+        purpose: intent.purpose,
         amount: intent.amount,
         currency: intent.currency,
         ticketId: intent.ticket ? String(intent.ticket) : null,
+        tip: intent.purpose === PAYMENT_INTENT_PURPOSE.TIP
+          ? {
+            target: intent.tip?.target || "",
+            driverId: intent.tip?.driver ? String(intent.tip.driver) : null,
+            ratingId: intent.tip?.rating ? String(intent.tip.rating) : null,
+          }
+          : null,
         providerReference: intent.providerReference || "",
         expiresAt: intent.expiresAt,
         paidAt: intent.paidAt,

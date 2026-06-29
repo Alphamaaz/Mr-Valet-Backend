@@ -69,9 +69,14 @@ const attendanceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["ACTIVE", "COMPLETED"],
+      enum: ["ACTIVE", "COMPLETED", "AUTO_CHECKED_OUT"],
       default: "ACTIVE",
       index: true,
+    },
+    autoCheckoutReason: {
+      type: String,
+      default: "",
+      trim: true,
     },
     deviceInfo: {
       type: mongoose.Schema.Types.Mixed,

@@ -23,6 +23,7 @@ import {
   updateTicketCheckout,
   updateTicketStatus,
   parkCar,
+  rateTicketDriver,
 } from "../controllers/ticket.controller.js";
 import { requireAuth, requireRoles } from "../middleware/auth.js";
 import { ROLES } from "../constants/roles.js";
@@ -163,6 +164,12 @@ router.post(
   "/:ticketId/retrieval-request",
   requireRoles(ROLES.OWNER, ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(requestRetrieval),
+);
+
+router.post(
+  "/:ticketId/rating",
+  requireRoles(ROLES.OWNER),
+  asyncHandler(rateTicketDriver),
 );
 
 router.patch(

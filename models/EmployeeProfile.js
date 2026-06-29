@@ -23,6 +23,11 @@ const employeeProfileSchema = new mongoose.Schema(
       min: 0,
       max: 5,
     },
+    ratingCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     performancePoints: {
       type: Number,
       default: 0,
