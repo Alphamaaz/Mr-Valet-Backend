@@ -566,17 +566,25 @@ function matchesTicketSearch(ticket, queryText) {
   );
 }
 
+function compactUser(user) {
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: String(user._id || user),
+    fullName: user.fullName || "",
+    phone: user.phone || "",
+    role: user.role || "",
+  };
+}
+
 function buildTicketSummary(ticket) {
   const keyControl = buildKeyControlMeta(ticket);
-  const activeDriver = ticket.deliveryDriver || ticket.assignedDriver || null;
-  const compactDriver = activeDriver
-    ? {
-      id: String(activeDriver._id || activeDriver),
-      fullName: activeDriver.fullName || "",
-      phone: activeDriver.phone || "",
-      role: activeDriver.role || "",
-    }
-    : null;
+  const assignedDriver = compactUser(ticket.assignedDriver);
+  const parkingDriver = compactUser(ticket.parkingDriver);
+  const deliveryDriver = compactUser(ticket.deliveryDriver);
+  const activeDriver = deliveryDriver || assignedDriver || parkingDriver;
   const compactCreatedBy = ticket.createdBy
     ? {
       id: String(ticket.createdBy._id || ticket.createdBy),
@@ -639,7 +647,10 @@ function buildTicketSummary(ticket) {
     },
     paymentRequirement: compactPaymentRequirement,
     createdBy: compactCreatedBy,
-    assignedDriver: compactDriver,
+    activeDriver,
+    assignedDriver,
+    parkingDriver,
+    deliveryDriver,
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
     parkedAt: ticket.parkedAt || null,
@@ -2745,6 +2756,11 @@ export async function getTicketById(req, res) {
   const ticket = await Ticket.findOne({ _id: ticketId, branch: req.user.branchId })
     .populate("vehicle")
     .populate("assignedDriver", "fullName phone role")
+    .populate("parkingDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
+    .populate("keyReceivedBy", "fullName phone role")
+    .populate("keyReleasedBy", "fullName phone role")
+    .populate("keyReleasedTo", "fullName phone role")
     .populate("createdBy", "fullName phone role")
     .lean();
 
@@ -2752,7 +2768,7 @@ export async function getTicketById(req, res) {
     throw notFound("Ticket not found");
   }
 
-  return res.status(200).json({ ticket });
+  return res.status(200).json({ ticket: buildTicketSummary(ticket) });
 }
 
 export async function listTickets(req, res) {
@@ -3032,6 +3048,8 @@ export async function linkOwnerToTicket(req, res) {
     .sort({ createdAt: -1 })
     .populate("vehicle")
     .populate("assignedDriver", "fullName phone role")
+    .populate("parkingDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
     .populate("sourceTicket", "ticketNumber valetCode status")
     .lean();
 
@@ -3072,6 +3090,7 @@ export async function getOwnerActiveTickets(req, res) {
     .limit(fetchLimit)
     .populate("vehicle")
     .populate("assignedDriver", "fullName phone role")
+    .populate("parkingDriver", "fullName phone role")
     .populate("deliveryDriver", "fullName phone role")
     .populate("sourceTicket", "ticketNumber valetCode status")
     .lean();
@@ -3097,7 +3116,7 @@ export async function getOwnerActiveTickets(req, res) {
 
   return res.status(200).json({
     count: filtered.length,
-    tickets: filtered,
+    tickets: filtered.map(buildTicketSummary),
   });
 }
 
@@ -3147,7 +3166,7 @@ export async function listRetrievalRequests(req, res) {
 
   return res.status(200).json({
     count: trimmed.length,
-    tickets: trimmed,
+    tickets: trimmed.map(buildTicketSummary),
   });
 }
 
@@ -3179,6 +3198,9 @@ export async function getMyAssignedTickets(req, res) {
     .limit(fetchLimit)
     .populate("vehicle")
     .populate("createdBy", "fullName")
+    .populate("assignedDriver", "fullName phone role")
+    .populate("parkingDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
     .lean();
 
   const queryText = (q || "").toLowerCase().trim();
@@ -3194,7 +3216,7 @@ export async function getMyAssignedTickets(req, res) {
 
   return res.status(200).json({
     count: trimmed.length,
-    tickets: trimmed,
+    tickets: trimmed.map(buildTicketSummary),
   });
 }
 
@@ -4109,11 +4131,17 @@ export async function cancelRetrievalAndRepark(req, res) {
     throw notFound("Ticket not found");
   }
 
-  if (!ACTIVE_DELIVERY_STATUSES.includes(ticket.status)) {
+  const canCancelForRepark = ACTIVE_DELIVERY_STATUSES.includes(ticket.status)
+    || ticket.status === TICKET_STATUS.DELIVERED;
+  if (!canCancelForRepark) {
     throw conflict(`Cannot cancel retrieval while ticket is in ${ticket.status}`);
   }
 
   let nextParkingDriver = ticket.deliveryDriver || ticket.assignedDriver || ticket.parkingDriver || null;
+  const isRequestedWithoutDriver = ticket.status === TICKET_STATUS.REQUESTED_FOR_DELIVERY
+    && !ticket.deliveryDriver
+    && !ticket.assignedDriver
+    && parsed.data.driverId === undefined;
   if (parsed.data.driverId !== undefined) {
     if (!isValidObjectId(parsed.data.driverId)) {
       throw badRequest("driverId must be a valid ObjectId");
@@ -4145,9 +4173,13 @@ export async function cancelRetrievalAndRepark(req, res) {
     retrieval: ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || null,
   };
 
-  ticket.status = TICKET_STATUS.READY_TO_BE_PARKED;
-  ticket.assignedDriver = nextParkingDriver;
-  ticket.parkingDriver = nextParkingDriver;
+  ticket.status = isRequestedWithoutDriver
+    ? TICKET_STATUS.PARKED_IN
+    : TICKET_STATUS.READY_TO_BE_PARKED;
+  ticket.assignedDriver = isRequestedWithoutDriver ? ticket.parkingDriver : nextParkingDriver;
+  if (!isRequestedWithoutDriver) {
+    ticket.parkingDriver = nextParkingDriver;
+  }
   ticket.deliveryDriver = null;
   if (parsed.data.garage !== undefined) ticket.garage = parsed.data.garage;
   if (parsed.data.slot !== undefined) ticket.slot = parsed.data.slot;
@@ -4175,9 +4207,13 @@ export async function cancelRetrievalAndRepark(req, res) {
     ticketId: ticket._id,
     status: ticket.status,
     actor: req.user.id,
-    note: "Retrieval cancelled; vehicle requires parking again",
+    note: isRequestedWithoutDriver
+      ? "Retrieval cancelled; vehicle returned to parked state"
+      : "Retrieval cancelled; vehicle requires parking again",
     meta: {
-      action: "RETRIEVAL_CANCELLED_READY_TO_PARK",
+      action: isRequestedWithoutDriver
+        ? "RETRIEVAL_CANCELLED_BACK_TO_PARKED"
+        : "RETRIEVAL_CANCELLED_READY_TO_PARK",
       reason: parsed.data.reason,
       from: previousState,
       to: {
@@ -4202,12 +4238,15 @@ export async function cancelRetrievalAndRepark(req, res) {
         ticketNumber: ticket.ticketNumber,
         status: ticket.status,
         assignedDriver: ticket.assignedDriver ? String(ticket.assignedDriver) : null,
+        flow: isRequestedWithoutDriver ? "RETURNED_TO_PARKED" : "READY_TO_BE_PARKED",
         garage: ticket.garage,
         slot: ticket.slot,
         keyTag: ticket.keyTag,
         keyNote: ticket.keyNote,
       },
-      "Retrieval cancelled. Ticket is ready to be parked again.",
+      isRequestedWithoutDriver
+        ? "Retrieval cancelled. Ticket returned to parked state."
+        : "Retrieval cancelled. Ticket is ready to be parked again.",
     ),
   );
 }
