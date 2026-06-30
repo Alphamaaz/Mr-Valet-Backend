@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   assignDriver,
+  cancelRetrievalAndRepark,
   claimDamage,
   createManualCarArrival,
   getDamageClaims,
@@ -24,6 +25,7 @@ import {
   updateTicketStatus,
   parkCar,
   rateTicketDriver,
+  reparkCar,
 } from "../controllers/ticket.controller.js";
 import { requireAuth, requireRoles } from "../middleware/auth.js";
 import { ROLES } from "../constants/roles.js";
@@ -110,6 +112,18 @@ router.post(
   "/nfc/departure-scan",
   requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(scanNfcForDeparture),
+);
+
+router.patch(
+  "/:ticketId/repark",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(reparkCar),
+);
+
+router.patch(
+  "/:ticketId/cancel-retrieval-repark",
+  requireRoles(ROLES.RECEPTIONIST, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(cancelRetrievalAndRepark),
 );
 
 router.get(

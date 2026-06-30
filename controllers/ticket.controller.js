@@ -3072,6 +3072,7 @@ export async function getOwnerActiveTickets(req, res) {
     .limit(fetchLimit)
     .populate("vehicle")
     .populate("assignedDriver", "fullName phone role")
+    .populate("deliveryDriver", "fullName phone role")
     .populate("sourceTicket", "ticketNumber valetCode status")
     .lean();
 
@@ -3914,8 +3915,26 @@ export async function confirmOwnerAppIssueIntent(req, res) {
 
 const parkCarSchema = z.object({
   slot:    z.string().trim().max(60).optional(),
+  garage:  z.string().trim().max(60).optional(),
   keyTag:  z.string().trim().max(40).optional(),
   keyNote: z.string().trim().max(300).optional(),
+});
+
+const reparkCarSchema = z.object({
+  garage: z.string().trim().min(1).max(60),
+  slot: z.string().trim().min(1).max(60),
+  keyTag: z.string().trim().max(40).optional(),
+  keyNote: z.string().trim().max(300).optional(),
+  notes: z.string().trim().max(500).optional(),
+});
+
+const cancelRetrievalAndReparkSchema = z.object({
+  driverId: z.string().trim().optional(),
+  garage: z.string().trim().max(60).optional(),
+  slot: z.string().trim().max(60).optional(),
+  keyTag: z.string().trim().max(40).optional(),
+  keyNote: z.string().trim().max(300).optional(),
+  reason: z.string().trim().min(1).max(500),
 });
 
 export async function parkCar(req, res) {
@@ -3952,6 +3971,7 @@ export async function parkCar(req, res) {
   // Update ticket fields
   const updates = {
     status:  TICKET_STATUS.PARKED_IN,
+    garage:  parsed.data.garage  ?? ticket.garage,
     slot:    parsed.data.slot    ?? ticket.slot,
     keyTag:  parsed.data.keyTag  ?? ticket.keyTag,
     keyNote: parsed.data.keyNote ?? ticket.keyNote,
@@ -3970,6 +3990,7 @@ export async function parkCar(req, res) {
     actor:  req.user.id,
     note:   parsed.data.keyNote || "",
     meta: {
+      garage:     parsed.data.garage || null,
       slot:       parsed.data.slot   || null,
       keyTag:     parsed.data.keyTag || null,
       photoPath,
@@ -3983,12 +4004,210 @@ export async function parkCar(req, res) {
         ticketId:     String(ticket._id),
         ticketNumber: ticket.ticketNumber,
         status:       ticket.status,
+        garage:       ticket.garage,
         slot:         ticket.slot,
         keyTag:       ticket.keyTag,
         keyNote:      ticket.keyNote,
         parkedPhotoUrl: photoUrl,
       },
       "Car parked successfully",
+    ),
+  );
+}
+
+export async function reparkCar(req, res) {
+  const { ticketId } = req.params;
+  if (!isValidObjectId(ticketId)) {
+    throw badRequest("ticketId must be a valid ObjectId");
+  }
+
+  const parsed = reparkCarSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid repark payload", parsed.error.flatten());
+  }
+
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const ticket = await Ticket.findOne({ _id: ticketId, branch: req.user.branchId });
+  if (!ticket) {
+    throw notFound("Ticket not found");
+  }
+
+  if (ticket.status !== TICKET_STATUS.PARKED_IN) {
+    throw conflict(`Cannot repark ticket while status is ${ticket.status}. Ticket must be PARKED_IN.`);
+  }
+
+  const previousParking = {
+    garage: ticket.garage || "",
+    slot: ticket.slot || "",
+    keyTag: ticket.keyTag || "",
+    keyNote: ticket.keyNote || "",
+  };
+
+  ticket.garage = parsed.data.garage;
+  ticket.slot = parsed.data.slot;
+  if (parsed.data.keyTag !== undefined) ticket.keyTag = parsed.data.keyTag;
+  if (parsed.data.keyNote !== undefined) ticket.keyNote = parsed.data.keyNote;
+  await ticket.save();
+
+  await logTicketEvent({
+    ticketId: ticket._id,
+    status: ticket.status,
+    actor: req.user.id,
+    note: "Vehicle reparked",
+    meta: {
+      action: "REPARK",
+      from: previousParking,
+      to: {
+        garage: ticket.garage || "",
+        slot: ticket.slot || "",
+        keyTag: ticket.keyTag || "",
+        keyNote: ticket.keyNote || "",
+      },
+      notes: parsed.data.notes || "",
+    },
+  });
+
+  void emitTicketStatusToOwner({ req, ticket });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        status: ticket.status,
+        garage: ticket.garage,
+        slot: ticket.slot,
+        keyTag: ticket.keyTag,
+        keyNote: ticket.keyNote,
+      },
+      "Vehicle reparked successfully",
+    ),
+  );
+}
+
+export async function cancelRetrievalAndRepark(req, res) {
+  const { ticketId } = req.params;
+  if (!isValidObjectId(ticketId)) {
+    throw badRequest("ticketId must be a valid ObjectId");
+  }
+
+  const parsed = cancelRetrievalAndReparkSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid cancel retrieval payload", parsed.error.flatten());
+  }
+
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const ticket = await Ticket.findOne({ _id: ticketId, branch: req.user.branchId });
+  if (!ticket) {
+    throw notFound("Ticket not found");
+  }
+
+  if (!ACTIVE_DELIVERY_STATUSES.includes(ticket.status)) {
+    throw conflict(`Cannot cancel retrieval while ticket is in ${ticket.status}`);
+  }
+
+  let nextParkingDriver = ticket.deliveryDriver || ticket.assignedDriver || ticket.parkingDriver || null;
+  if (parsed.data.driverId !== undefined) {
+    if (!isValidObjectId(parsed.data.driverId)) {
+      throw badRequest("driverId must be a valid ObjectId");
+    }
+
+    const driver = await User.findById(parsed.data.driverId).select("_id role isActive branch").lean();
+    if (
+      !driver
+      || driver.role !== ROLES.DRIVER
+      || !driver.isActive
+      || String(driver.branch) !== String(ticket.branch)
+    ) {
+      throw badRequest("Selected user is not an active driver in this branch");
+    }
+    nextParkingDriver = driver._id;
+  }
+
+  const previousState = {
+    status: ticket.status,
+    assignedDriver: ticket.assignedDriver ? String(ticket.assignedDriver) : null,
+    deliveryDriver: ticket.deliveryDriver ? String(ticket.deliveryDriver) : null,
+    garage: ticket.garage || "",
+    slot: ticket.slot || "",
+    keyTag: ticket.keyTag || "",
+    keyNote: ticket.keyNote || "",
+    keyReleasedAt: ticket.keyReleasedAt || null,
+    keyReleasedBy: ticket.keyReleasedBy ? String(ticket.keyReleasedBy) : null,
+    keyReleasedTo: ticket.keyReleasedTo ? String(ticket.keyReleasedTo) : null,
+    retrieval: ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || null,
+  };
+
+  ticket.status = TICKET_STATUS.READY_TO_BE_PARKED;
+  ticket.assignedDriver = nextParkingDriver;
+  ticket.parkingDriver = nextParkingDriver;
+  ticket.deliveryDriver = null;
+  if (parsed.data.garage !== undefined) ticket.garage = parsed.data.garage;
+  if (parsed.data.slot !== undefined) ticket.slot = parsed.data.slot;
+  if (parsed.data.keyTag !== undefined) ticket.keyTag = parsed.data.keyTag;
+  if (parsed.data.keyNote !== undefined) ticket.keyNote = parsed.data.keyNote;
+  ticket.keyReleasedAt = null;
+  ticket.keyReleasedBy = null;
+  ticket.keyReleasedTo = null;
+  ticket.retrieval = {
+    ...(ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || {}),
+    requestedAt: null,
+    requestedBy: null,
+    requestedByRole: "",
+    assignedAt: null,
+    assignedBy: null,
+    keyReleasedAt: null,
+    keyReleasedBy: null,
+    keyReleasedTo: null,
+    arrivedAt: null,
+    deliveredAt: null,
+  };
+  await ticket.save();
+
+  await logTicketEvent({
+    ticketId: ticket._id,
+    status: ticket.status,
+    actor: req.user.id,
+    note: "Retrieval cancelled; vehicle requires parking again",
+    meta: {
+      action: "RETRIEVAL_CANCELLED_READY_TO_PARK",
+      reason: parsed.data.reason,
+      from: previousState,
+      to: {
+        status: ticket.status,
+        assignedDriver: ticket.assignedDriver ? String(ticket.assignedDriver) : null,
+        deliveryDriver: null,
+        garage: ticket.garage || "",
+        slot: ticket.slot || "",
+        keyTag: ticket.keyTag || "",
+        keyNote: ticket.keyNote || "",
+      },
+    },
+  });
+
+  void emitTicketStatusToOwner({ req, ticket });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        status: ticket.status,
+        assignedDriver: ticket.assignedDriver ? String(ticket.assignedDriver) : null,
+        garage: ticket.garage,
+        slot: ticket.slot,
+        keyTag: ticket.keyTag,
+        keyNote: ticket.keyNote,
+      },
+      "Retrieval cancelled. Ticket is ready to be parked again.",
     ),
   );
 }
