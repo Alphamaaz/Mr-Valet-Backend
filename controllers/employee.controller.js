@@ -232,9 +232,9 @@ export async function getFreeDrivers(req, res) {
 
   const busyStatuses = [
     TICKET_STATUS.READY_TO_BE_PARKED,
-    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.ON_THE_WAY_TO_PARKING,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
   ];
 
   const activeTickets = await Ticket.find({
@@ -467,10 +467,12 @@ export async function getEmployeeTickets(req, res) {
     .lean();
   if (!user) throw notFound("Employee not found");
 
-  // Find tickets where this user was the assigned driver or created the ticket
+  // Find tickets where this user participated in issuing, parking, or delivery.
   const tickets = await Ticket.find({
     $or: [
       { assignedDriver: id },
+      { parkingDriver: id },
+      { deliveryDriver: id },
       { createdBy: id },
     ],
   })
@@ -482,9 +484,17 @@ export async function getEmployeeTickets(req, res) {
 
   const ticketResults = tickets.map((t) => {
     const keyHandover = buildKeyHandoverRecord(t);
+    const employeeRoles = [];
+    if (String(t.createdBy || "") === id) employeeRoles.push("ISSUED");
+    if (String(t.assignedDriver || "") === id) employeeRoles.push("ASSIGNED");
+    if (String(t.parkingDriver || "") === id) employeeRoles.push("PARKING");
+    if (String(t.deliveryDriver || "") === id) employeeRoles.push("DELIVERY");
+
     return {
       id: String(t._id),
       ticketNumber: t.ticketNumber,
+      status: t.status,
+      employeeRoles,
       numberPlate: t.vehicle?.plate || "",
       vehicleDisplay: t.vehicle ? `${t.vehicle.make} - ${t.vehicle.model}`.trim() : "",
       vehicleColor: t.vehicle?.color || "",
@@ -659,4 +669,6 @@ export async function toggleBreak(req, res) {
     ),
   );
 }
+
+
 
