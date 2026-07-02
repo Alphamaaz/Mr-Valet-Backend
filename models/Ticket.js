@@ -172,6 +172,11 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    ownerCompletedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
     keyNote: {
       type: String,
       default: "",
@@ -331,7 +336,9 @@ ticketSchema.index({ branch: 1, assignedDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, parkingDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, deliveryDriver: 1, status: 1 });
 ticketSchema.index({ branch: 1, ownerPhone: 1, status: 1 });
+ticketSchema.index({ ownerUser: 1, status: 1, ownerCompletedAt: 1 });
 ticketSchema.index({ branch: 1, paperTicketSerial: 1, status: 1 });
 ticketSchema.index({ branch: 1, nfcTagUid: 1, status: 1 });
 
 export const Ticket = mongoose.model("Ticket", ticketSchema);
+

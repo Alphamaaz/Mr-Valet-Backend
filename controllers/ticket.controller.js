@@ -263,11 +263,10 @@ const updateTicketCheckoutSchema = z.object({
 const keyControllerQueueQuerySchema = z.object({
   status: z.enum([
     TICKET_STATUS.READY_TO_BE_PARKED,
+    TICKET_STATUS.ON_THE_WAY_TO_PARKING,
     TICKET_STATUS.PARKED_IN,
-    TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
   ]).optional(),
   keyStatus: z.enum(["KEY_PENDING", "KEY_RECEIVED"]).optional(),
   keyReleaseStatus: z.enum(["KEY_RELEASE_PENDING", "KEY_RELEASED", "NOT_APPLICABLE"]).optional(),
@@ -278,10 +277,8 @@ const keyControllerQueueQuerySchema = z.object({
 
 const retrievalRequestsQuerySchema = z.object({
   status: z.enum([
-    TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
   ]).optional(),
   q: z.string().trim().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -661,6 +658,8 @@ function buildTicketSummary(ticket) {
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
     parkedAt: ticket.parkedAt || null,
+    ownerCompletedAt: ticket.ownerCompletedAt || null,
+    ownerCompletionPending: ticket.status === TICKET_STATUS.DELIVERED && !ticket.ownerCompletedAt,
     keyReceivedAt: ticket.keyReceivedAt || null,
     keyReleasedAt: ticket.keyReleasedAt || null,
     keyControl: compactKeyControl,
@@ -847,6 +846,7 @@ const PARKING_ASSIGNABLE_STATUSES = [
 
 const PARKING_ASSIGNED_STATUSES = [
   TICKET_STATUS.READY_TO_BE_PARKED,
+  TICKET_STATUS.ON_THE_WAY_TO_PARKING,
 ];
 
 const PARKED_STATUSES = [
@@ -854,25 +854,21 @@ const PARKED_STATUSES = [
 ];
 
 const RETRIEVAL_REQUESTED_STATUSES = [
-  TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+  TICKET_STATUS.RETRIEVAL_REQUESTED,
 ];
 
-const DELIVERY_ASSIGNED_STATUSES = [
-  TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-];
+const DELIVERY_ASSIGNED_STATUSES = [];
 
 const ACTIVE_DELIVERY_STATUSES = [
   ...RETRIEVAL_REQUESTED_STATUSES,
-  ...DELIVERY_ASSIGNED_STATUSES,
-  TICKET_STATUS.ON_THE_WAY,
-  TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+  TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
 ];
 
 const DRIVER_BUSY_STATUSES = [
   TICKET_STATUS.READY_TO_BE_PARKED,
-  TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-  TICKET_STATUS.ON_THE_WAY,
-  TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+  TICKET_STATUS.ON_THE_WAY_TO_PARKING,
+  TICKET_STATUS.RETRIEVAL_REQUESTED,
+  TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
 ];
 
 const PAYMENT_RESOLVED_STATUSES = [
@@ -915,9 +911,12 @@ function buildPaymentRequirement(ticket, stage = "GENERAL") {
 }
 
 function resolveDriverForStatus(ticket, status) {
+  if (status === TICKET_STATUS.ON_THE_WAY_TO_PARKING || status === TICKET_STATUS.PARKED_IN) {
+    return ticket.parkingDriver || ticket.assignedDriver;
+  }
+
   if ([
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
     TICKET_STATUS.DELIVERED,
   ].includes(status)) {
     return ticket.deliveryDriver || ticket.assignedDriver;
@@ -1356,7 +1355,7 @@ async function markRetrievalRequestedOnTicket({
     throw conflict("A retrieval request is already active for this ticket");
   }
 
-  ticket.status = TICKET_STATUS.REQUESTED_FOR_DELIVERY;
+  ticket.status = TICKET_STATUS.RETRIEVAL_REQUESTED;
   ticket.deliveryDriver = null;
   ticket.assignedDriver = null;
   ticket.keyReleasedAt = null;
@@ -1562,11 +1561,11 @@ async function emitRetrievalRequestedToOps({
 // Covers owner-visible active ticket status updates.
 
 const STATUS_MESSAGES = {
+  [TICKET_STATUS.READY_TO_BE_PARKED]: "Your car is ready to be parked.",
+  [TICKET_STATUS.ON_THE_WAY_TO_PARKING]: "Your driver is taking your car to parking.",
   [TICKET_STATUS.PARKED_IN]:             "Your car has been parked safely.",
-  [TICKET_STATUS.REQUESTED_FOR_DELIVERY]: "Your retrieval request is being processed.",
-  [TICKET_STATUS.ASSIGNED_FOR_DELIVERY]: "A driver has been assigned to bring your car.",
-  [TICKET_STATUS.ON_THE_WAY]:           "Your car is on the way to the receiving point.",
-  [TICKET_STATUS.ARRIVED_FOR_DELIVERY]:  "Your car has arrived at the receiving point.",
+  [TICKET_STATUS.RETRIEVAL_REQUESTED]: "Your retrieval request is being processed.",
+  [TICKET_STATUS.ON_THE_WAY_TO_DELIVERY]: "Your car is on the way to the receiving point.",
   [TICKET_STATUS.DELIVERED]:            "Your valet ticket is completed. Thank you for using Mr Valet.",
 };
 
@@ -1590,7 +1589,7 @@ async function emitTicketStatusToOwner({ req, ticket }) {
     const message = STATUS_MESSAGES[ticket.status] || `Ticket status updated to ${ticket.status}`;
     const paymentRequirement = buildPaymentRequirement(
       ticket,
-      ticket.status === TICKET_STATUS.REQUESTED_FOR_DELIVERY
+      ticket.status === TICKET_STATUS.RETRIEVAL_REQUESTED
         ? "RETRIEVAL_REQUEST"
         : ticket.status === TICKET_STATUS.DELIVERED
           ? "DELIVERY"
@@ -1623,6 +1622,80 @@ async function emitTicketStatusToOwner({ req, ticket }) {
     console.log(`[Socket.IO] Emitted ticket_status_update (${ticket.status}) to owner ${ownerUserId}`);
   } catch (error) {
     console.error("[Socket.IO] Failed to emit ticket_status_update:", error?.message || error);
+  }
+}
+
+async function emitTicketRealtimeUpdate({
+  req,
+  ticket,
+  eventType = "STATUS_CHANGED",
+  previousStatus = null,
+  actor = null,
+  extra = {},
+}) {
+  try {
+    const io = req.app?.get("io");
+    if (!io || !ticket?._id) {
+      return;
+    }
+
+    let ownerUserId = ticket.ownerUser ? String(ticket.ownerUser) : null;
+    if (!ownerUserId && ticket.ownerPhone) {
+      const ownerUser = await User.findOne({ phone: ticket.ownerPhone, isActive: true })
+        .select("_id")
+        .lean();
+      if (ownerUser) {
+        ownerUserId = String(ownerUser._id);
+      }
+    }
+    const assignedDriverId = ticket.assignedDriver ? String(ticket.assignedDriver) : null;
+    const parkingDriverId = ticket.parkingDriver ? String(ticket.parkingDriver) : null;
+    const deliveryDriverId = ticket.deliveryDriver ? String(ticket.deliveryDriver) : null;
+    const branchId = ticket.branch ? String(ticket.branch) : "";
+    const message = STATUS_MESSAGES[ticket.status] || `Ticket status updated to ${ticket.status}`;
+
+    const payload = {
+      eventType,
+      ticketId: String(ticket._id),
+      ticketNumber: ticket.ticketNumber,
+      valetCode: ticket.valetCode,
+      previousStatus,
+      status: ticket.status,
+      message,
+      branchId,
+      assignedDriverId,
+      parkingDriverId,
+      deliveryDriverId,
+      ownerUserId,
+      keyControl: buildKeyControlMeta(ticket),
+      paymentRequirement: buildPaymentRequirement(
+        ticket,
+        ticket.status === TICKET_STATUS.RETRIEVAL_REQUESTED
+          ? "RETRIEVAL_REQUEST"
+          : ticket.status === TICKET_STATUS.DELIVERED
+            ? "DELIVERY"
+            : "GENERAL",
+      ),
+      actor: actor || {
+        id: req.user?.id ? String(req.user.id) : null,
+        role: req.user?.role || "",
+      },
+      updatedAt: new Date().toISOString(),
+      ...extra,
+    };
+
+    const rooms = new Set([`ticket_${String(ticket._id)}`]);
+    if (branchId) rooms.add(`branch_${branchId}`);
+    if (ownerUserId) rooms.add(`user_${ownerUserId}`);
+    if (assignedDriverId) rooms.add(`user_${assignedDriverId}`);
+    if (parkingDriverId) rooms.add(`user_${parkingDriverId}`);
+    if (deliveryDriverId) rooms.add(`user_${deliveryDriverId}`);
+
+    rooms.forEach((room) => {
+      io.to(room).emit("ticket_status_changed", payload);
+    });
+  } catch (error) {
+    console.error("[Socket.IO] Failed to emit ticket_status_changed:", error?.message || error);
   }
 }
 
@@ -1671,7 +1744,10 @@ export async function assignDriver(req, res) {
   }
 
   const previousStatus = ticket.status;
-  const isDeliveryAssignment = RETRIEVAL_REQUESTED_STATUSES.includes(ticket.status);
+  const isDeliveryAssignment = [
+    ...RETRIEVAL_REQUESTED_STATUSES,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
+  ].includes(ticket.status);
   const previousDriverId = isDeliveryAssignment
     ? (ticket.deliveryDriver ? String(ticket.deliveryDriver) : null)
     : (ticket.assignedDriver ? String(ticket.assignedDriver) : null);
@@ -1683,7 +1759,7 @@ export async function assignDriver(req, res) {
   const canAssignDeliveryDriver = [
     ...RETRIEVAL_REQUESTED_STATUSES,
     ...DELIVERY_ASSIGNED_STATUSES,
-    TICKET_STATUS.ON_THE_WAY,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
   ].includes(ticket.status);
 
   if (!canAssignParkingDriver && !canAssignDeliveryDriver) {
@@ -1741,7 +1817,9 @@ export async function assignDriver(req, res) {
 
   if (isDeliveryAssignment) {
     ticket.deliveryDriver = driverId;
-    ticket.status = TICKET_STATUS.ASSIGNED_FOR_DELIVERY;
+    if (RETRIEVAL_REQUESTED_STATUSES.includes(ticket.status)) {
+      ticket.status = TICKET_STATUS.RETRIEVAL_REQUESTED;
+    }
     ticket.retrieval = {
       ...(ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || {}),
       assignedAt: new Date(),
@@ -1783,6 +1861,16 @@ export async function assignDriver(req, res) {
     req,
     ticket,
     driverId,
+  });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: isDeliveryAssignment ? "DELIVERY_DRIVER_ASSIGNED" : "PARKING_DRIVER_ASSIGNED",
+    previousStatus,
+    extra: {
+      driverId: String(driverId),
+      assignmentType: isDeliveryAssignment ? "DELIVERY" : "PARKING",
+    },
   });
 
   return res.status(200).json(
@@ -2009,12 +2097,7 @@ export async function updateTicketStatus(req, res) {
   const nextStatus = parsed.data.status;
   const transitionAllowed = canTransitionStatus(ticket.status, nextStatus)
     || (PARKING_ASSIGNED_STATUSES.includes(ticket.status) && PARKED_STATUSES.includes(nextStatus))
-    || (PARKED_STATUSES.includes(ticket.status) && RETRIEVAL_REQUESTED_STATUSES.includes(nextStatus))
-    || (DELIVERY_ASSIGNED_STATUSES.includes(ticket.status) && nextStatus === TICKET_STATUS.ON_THE_WAY)
-    || (ticket.status === TICKET_STATUS.ON_THE_WAY && [
-      TICKET_STATUS.ARRIVED_FOR_DELIVERY,
-      TICKET_STATUS.DELIVERED,
-    ].includes(nextStatus));
+    || (PARKED_STATUSES.includes(ticket.status) && RETRIEVAL_REQUESTED_STATUSES.includes(nextStatus));
 
   if (!transitionAllowed) {
     throw conflict(`Invalid status transition: ${ticket.status} -> ${nextStatus}`);
@@ -2034,7 +2117,12 @@ export async function updateTicketStatus(req, res) {
     throw forbidden("Only receptionist, key controller, or supervisor can request retrieval");
   }
 
-  if ([TICKET_STATUS.ON_THE_WAY, TICKET_STATUS.ARRIVED_FOR_DELIVERY, TICKET_STATUS.DELIVERED].includes(nextStatus)) {
+  if ([
+    TICKET_STATUS.ON_THE_WAY_TO_PARKING,
+    TICKET_STATUS.PARKED_IN,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
+    TICKET_STATUS.DELIVERED,
+  ].includes(nextStatus)) {
     if (req.user.role !== ROLES.DRIVER) {
       throw forbidden(`Only assigned driver can update status to ${nextStatus}`);
     }
@@ -2046,6 +2134,7 @@ export async function updateTicketStatus(req, res) {
   }
 
   if (RETRIEVAL_REQUESTED_STATUSES.includes(nextStatus)) {
+    const previousStatus = ticket.status;
     await markRetrievalRequestedOnTicket({
       ticket,
       requestedById: req.user.id,
@@ -2058,6 +2147,12 @@ export async function updateTicketStatus(req, res) {
       ticket,
     });
     void emitTicketStatusToOwner({ req, ticket });
+    void emitTicketRealtimeUpdate({
+      req,
+      ticket,
+      eventType: "RETRIEVAL_REQUESTED",
+      previousStatus,
+    });
 
     const populatedTicket = await Ticket.findById(ticket._id)
       .populate("vehicle")
@@ -2077,6 +2172,7 @@ export async function updateTicketStatus(req, res) {
     );
   }
 
+  const previousStatus = ticket.status;
   ticket.status = nextStatus;
   if (PARKED_STATUSES.includes(nextStatus) && !ticket.parkedAt) {
     ticket.parkedAt = new Date();
@@ -2089,10 +2185,10 @@ export async function updateTicketStatus(req, res) {
     ticket.keyReleasedBy = null;
     ticket.keyReleasedTo = null;
   }
-  if (nextStatus === TICKET_STATUS.ARRIVED_FOR_DELIVERY) {
+  if (nextStatus === TICKET_STATUS.ON_THE_WAY_TO_DELIVERY) {
     ticket.retrieval = {
       ...(ticket.retrieval?.toObject ? ticket.retrieval.toObject() : ticket.retrieval || {}),
-      arrivedAt: new Date(),
+      assignedAt: ticket.retrieval?.assignedAt || new Date(),
     };
   }
   if (nextStatus === TICKET_STATUS.DELIVERED) {
@@ -2151,16 +2247,21 @@ export async function updateTicketStatus(req, res) {
 
   // Notify car owner in real-time for owner-visible status changes
   const ownerNotifyStatuses = [
+    TICKET_STATUS.ON_THE_WAY_TO_PARKING,
     TICKET_STATUS.PARKED_IN,
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
     TICKET_STATUS.DELIVERED,
-    TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
   ];
   if (ownerNotifyStatuses.includes(nextStatus)) {
     void emitTicketStatusToOwner({ req, ticket });
   }
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "STATUS_CHANGED",
+    previousStatus,
+  });
 
   const responseData = {
     message: "Ticket status updated successfully",
@@ -2268,6 +2369,12 @@ export async function recordTicketPayment(req, res) {
         receiptLink,
       },
     },
+  });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "PAYMENT_UPDATED",
+    previousStatus: ticket.status,
   });
 
   return res.status(200).json(
@@ -2559,6 +2666,9 @@ export async function rateTicketDriver(req, res) {
   profile.rating = Number((((previousRating * previousCount) + rating) / (previousCount + 1)).toFixed(2));
   profile.ratingCount = previousCount + 1;
   await profile.save();
+
+  ticket.ownerCompletedAt = ticket.ownerCompletedAt || new Date();
+  await ticket.save();
 
   let tipPayment = null;
   if (tipAmount > 0) {
@@ -3075,6 +3185,9 @@ export async function getTicketHistory(req, res) {
       throw forbidden("Owner phone or account identity is missing");
     }
     filter.$and = [...(filter.$and || []), ownerFilter];
+    if (!status && scope === "completed") {
+      filter.ownerCompletedAt = { $ne: null };
+    }
   } else if (userRole === ROLES.OPERATIONS_MANAGER) {
     if (branchId) {
       if (!isValidObjectId(branchId)) {
@@ -3290,7 +3403,12 @@ export async function getOwnerActiveTickets(req, res) {
   const tickets = await Ticket.find({
     $and: [
       ownerFilter,
-      { status: { $nin: OWNER_TERMINAL_STATUSES } },
+      {
+        $or: [
+          { status: { $nin: OWNER_TERMINAL_STATUSES } },
+          { status: TICKET_STATUS.DELIVERED, ownerCompletedAt: null },
+        ],
+      },
     ],
   })
     .sort({ updatedAt: -1, createdAt: -1 })
@@ -3397,6 +3515,8 @@ export async function getMyAssignedTickets(req, res) {
   };
   if (status) {
     filter.status = status;
+  } else {
+    filter.status = { $nin: OWNER_TERMINAL_STATUSES };
   }
 
   const fetchLimit = q ? Math.max(limit, 300) : limit;
@@ -3445,11 +3565,10 @@ export async function getKeyControllerQueue(req, res) {
       : {
         $in: [
           TICKET_STATUS.READY_TO_BE_PARKED,
+          TICKET_STATUS.ON_THE_WAY_TO_PARKING,
           TICKET_STATUS.PARKED_IN,
-          TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-          TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-          TICKET_STATUS.ON_THE_WAY,
-          TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+          TICKET_STATUS.RETRIEVAL_REQUESTED,
+          TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
         ],
       },
   };
@@ -3646,6 +3765,12 @@ export async function markKeyReceived(req, res) {
       keyReceivedBy: req.user.id,
     },
   });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "KEY_RECEIVED",
+    previousStatus: ticket.status,
+  });
 
   await recordKeyHandoverViolationIfLate({
     ticket,
@@ -3755,6 +3880,12 @@ export async function releaseKey(req, res) {
   } catch (error) {
     console.error("[Socket.IO] Failed to emit key_released:", error?.message || error);
   }
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "KEY_RELEASED",
+    previousStatus: ticket.status,
+  });
 
   const populatedTicket = await Ticket.findById(ticket._id)
     .populate("vehicle", "plate make model color photo")
@@ -4101,6 +4232,12 @@ export async function createManualCarArrival(req, res) {
     .populate("vehicle", "plate make model color photo")
     .populate("assignedDriver", "fullName phone role")
     .lean();
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "TICKET_CREATED",
+    previousStatus: null,
+  });
 
   return res.status(201).json(
     new ApiResponse(
@@ -4278,16 +4415,18 @@ export async function parkCar(req, res) {
   const ticket = await Ticket.findById(ticketId);
   if (!ticket) throw notFound("Ticket not found");
 
-  // Only the assigned driver can park this ticket
-  if (String(ticket.assignedDriver) !== req.user.id) {
+  const parkingDriver = ticket.parkingDriver || ticket.assignedDriver;
+
+  // Only the assigned parking driver can park this ticket
+  if (!parkingDriver || String(parkingDriver) !== req.user.id) {
     throw forbidden("You are not the assigned driver for this ticket");
   }
 
   // Ticket must have a parking driver assigned before it can be parked.
-  const allowedStatuses = [TICKET_STATUS.READY_TO_BE_PARKED];
+  const allowedStatuses = [TICKET_STATUS.READY_TO_BE_PARKED, TICKET_STATUS.ON_THE_WAY_TO_PARKING];
   if (!allowedStatuses.includes(ticket.status)) {
     throw conflict(
-      `Cannot park ticket. Current status is "${ticket.status}". Must be READY_TO_BE_PARKED.`,
+      `Cannot park ticket. Current status is "${ticket.status}". Must be READY_TO_BE_PARKED or ON_THE_WAY_TO_PARKING.`,
     );
   }
 
@@ -4295,6 +4434,8 @@ export async function parkCar(req, res) {
   const baseUrl   = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
   const photoPath = req.file ? `/public/parked/${req.file.filename}` : null;
   const photoUrl  = photoPath ? `${baseUrl}${photoPath}` : null;
+
+  const previousStatus = ticket.status;
 
   // Update ticket fields
   const updates = {
@@ -4322,6 +4463,16 @@ export async function parkCar(req, res) {
       slot:       parsed.data.slot   || null,
       keyTag:     parsed.data.keyTag || null,
       photoPath,
+    },
+  });
+  void emitTicketStatusToOwner({ req, ticket });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "PARKED",
+    previousStatus,
+    extra: {
+      parkedPhotoUrl: photoUrl,
     },
   });
 
@@ -4399,6 +4550,17 @@ export async function reparkCar(req, res) {
   });
 
   void emitTicketStatusToOwner({ req, ticket });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: "REPARKED",
+    previousStatus: ticket.status,
+    extra: {
+      garage: ticket.garage,
+      slot: ticket.slot,
+      keyTag: ticket.keyTag,
+    },
+  });
 
   return res.status(200).json(
     new ApiResponse(
@@ -4444,7 +4606,7 @@ export async function cancelRetrievalAndRepark(req, res) {
   }
 
   let nextParkingDriver = ticket.deliveryDriver || ticket.assignedDriver || ticket.parkingDriver || null;
-  const isRequestedWithoutDriver = ticket.status === TICKET_STATUS.REQUESTED_FOR_DELIVERY
+  const isRequestedWithoutDriver = ticket.status === TICKET_STATUS.RETRIEVAL_REQUESTED
     && !ticket.deliveryDriver
     && !ticket.assignedDriver
     && parsed.data.driverId === undefined;
@@ -4535,6 +4697,16 @@ export async function cancelRetrievalAndRepark(req, res) {
   });
 
   void emitTicketStatusToOwner({ req, ticket });
+  void emitTicketRealtimeUpdate({
+    req,
+    ticket,
+    eventType: isRequestedWithoutDriver ? "RETRIEVAL_CANCELLED_BACK_TO_PARKED" : "RETRIEVAL_CANCELLED_READY_TO_PARK",
+    previousStatus: previousState.status,
+    extra: {
+      flow: isRequestedWithoutDriver ? "RETURNED_TO_PARKED" : "READY_TO_BE_PARKED",
+      assignedDriver: ticket.assignedDriver ? String(ticket.assignedDriver) : null,
+    },
+  });
 
   return res.status(200).json(
     new ApiResponse(
@@ -4556,3 +4728,5 @@ export async function cancelRetrievalAndRepark(req, res) {
     ),
   );
 }
+
+

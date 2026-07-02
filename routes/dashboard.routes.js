@@ -1,13 +1,19 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRoles } from "../middleware/auth.js";
+import { ROLES } from "../constants/roles.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { getDashboardStats } from "../controllers/dashboard.controller.js";
+import { getDashboardStats, getManagerDashboardStats } from "../controllers/dashboard.controller.js";
 
 const router = Router();
 
 router.use(requireAuth);
 
-// GET /api/v1/dashboard  — Dashboard tab stats
 router.get("/", asyncHandler(getDashboardStats));
+
+router.get(
+  "/manager",
+  requireRoles(ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER, ROLES.SUPER_ADMIN),
+  asyncHandler(getManagerDashboardStats),
+);
 
 export default router;

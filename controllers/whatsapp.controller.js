@@ -332,10 +332,8 @@ async function handleRequestCommand({ from, identifier }) {
   }
 
   if ([
-    TICKET_STATUS.REQUESTED_FOR_DELIVERY,
-    TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
-    TICKET_STATUS.ON_THE_WAY,
-    TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+    TICKET_STATUS.RETRIEVAL_REQUESTED,
+    TICKET_STATUS.ON_THE_WAY_TO_DELIVERY,
   ].includes(ticket.status)) {
     await sendWhatsAppTextMessage({
       phone: from,
@@ -344,7 +342,7 @@ async function handleRequestCommand({ from, identifier }) {
     return;
   }
 
-  if (!canTransitionStatus(ticket.status, TICKET_STATUS.REQUESTED_FOR_DELIVERY)) {
+  if (!canTransitionStatus(ticket.status, TICKET_STATUS.RETRIEVAL_REQUESTED)) {
     await sendWhatsAppTextMessage({
       phone: from,
       message: `Cannot request retrieval while ticket is ${ticket.status}. Please contact reception.`,
@@ -360,7 +358,7 @@ async function handleRequestCommand({ from, identifier }) {
     { _id: ticket._id },
     {
       $set: {
-        status: TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+        status: TICKET_STATUS.RETRIEVAL_REQUESTED,
         assignedDriver: null,
         deliveryDriver: null,
         ownerPhone: linkedOwnerPhone || from,
@@ -380,7 +378,7 @@ async function handleRequestCommand({ from, identifier }) {
 
   await TicketEvent.create({
     ticket: ticket._id,
-    status: TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+    status: TICKET_STATUS.RETRIEVAL_REQUESTED,
     actor: null,
     note: "Retrieval request created via WhatsApp",
     meta: {
@@ -454,3 +452,5 @@ export async function receiveWebhook(req, res) {
 
   return res.sendStatus(200);
 }
+
+

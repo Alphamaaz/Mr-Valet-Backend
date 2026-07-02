@@ -3,6 +3,7 @@ import { createAdapter } from "@socket.io/redis-adapter";
 import { verifyAccessToken } from "../utils/token.js";
 import { User } from "../models/User.js";
 import { ChatGroup } from "../models/ChatGroup.js";
+import { Ticket } from "../models/Ticket.js";
 import { getRedisClients } from "../utils/redis.js";
 
 /**
@@ -51,6 +52,8 @@ export function initSocketIO(httpServer, app) {
 
       socket.userId = String(user._id);
       socket.userRole = user.role;
+      socket.branchId = user.branch ? String(user.branch) : "";
+      socket.userPhone = user.phone || "";
       next();
     } catch (err) {
       next(new Error("Authentication failed"));
@@ -64,6 +67,10 @@ export function initSocketIO(httpServer, app) {
 
     // Join personal room
     socket.join(`user_${userId}`);
+    if (socket.branchId) {
+      socket.join(`branch_${socket.branchId}`);
+      socket.join(`branch_${socket.branchId}_${socket.userRole}`);
+    }
 
     // Auto-join all group rooms the user belongs to
     try {
@@ -115,6 +122,44 @@ export function initSocketIO(httpServer, app) {
     });
 
     // ── Disconnect ──────────────────────────────────────────────────
+
+    socket.on("join_ticket", async ({ ticketId }, callback) => {
+      try {
+        if (!ticketId) {
+          throw new Error("ticketId is required");
+        }
+
+        const ticket = await Ticket.findById(ticketId)
+          .select("_id branch ownerUser ownerPhone assignedDriver parkingDriver deliveryDriver")
+          .lean();
+        if (!ticket) {
+          throw new Error("Ticket not found");
+        }
+
+        const isStaffInBranch = socket.branchId && String(ticket.branch) === socket.branchId;
+        const isOwner = (ticket.ownerUser && String(ticket.ownerUser) === userId)
+          || (ticket.ownerPhone && socket.userPhone && ticket.ownerPhone === socket.userPhone);
+        const isAssignedDriver = [ticket.assignedDriver, ticket.parkingDriver, ticket.deliveryDriver]
+          .filter(Boolean)
+          .some((id) => String(id) === userId);
+
+        if (!isStaffInBranch && !isOwner && !isAssignedDriver) {
+          throw new Error("Not allowed to join this ticket");
+        }
+
+        socket.join(`ticket_${ticketId}`);
+        callback?.({ ok: true, ticketId });
+      } catch (error) {
+        callback?.({ ok: false, message: error.message });
+      }
+    });
+
+    socket.on("leave_ticket", ({ ticketId }) => {
+      if (ticketId) {
+        socket.leave(`ticket_${ticketId}`);
+      }
+    });
+
     socket.on("disconnect", () => {
       console.log(`[Socket.IO] User disconnected: ${userId} (socket ${socket.id})`);
       const userSockets = onlineUsers.get(userId);
@@ -130,3 +175,4 @@ export function initSocketIO(httpServer, app) {
 
   return io;
 }
+
