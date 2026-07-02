@@ -26,6 +26,7 @@ import { PAYMENT_STATUS, PAYMENT_STATUS_VALUES } from "../constants/paymentStatu
 import { generateTicketNumber, generateValetCode } from "../utils/idGenerator.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { sendTextSms } from "../services/vodafone.service.js";
+import { sendPushToUser, NOTIFICATION_TYPES } from "../services/notification.service.js";
 
 const PAYMENT_METHOD_VALUES = Object.freeze([
   "CASH",
@@ -305,6 +306,12 @@ const ownerLinkTicketSchema = z.object({
 const ownerTicketListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   q: z.string().trim().max(60).optional(),
+});
+
+const managerTransactionsQuerySchema = z.object({
+  scope: z.enum(["active", "delivered"]).default("active"),
+  q: z.string().trim().max(60).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 
 const ticketHistoryQuerySchema = z.object({
@@ -791,6 +798,49 @@ function buildKeyControlMeta(ticket) {
   };
 }
 
+async function recordKeyHandoverViolationIfLate({ ticket, parkedAt, keyReceivedAt }) {
+  if (!parkedAt || !keyReceivedAt) {
+    return;
+  }
+
+  const slaSeconds = Number.isFinite(KEY_HANDOVER_SLA_SECONDS) && KEY_HANDOVER_SLA_SECONDS > 0
+    ? KEY_HANDOVER_SLA_SECONDS
+    : 90;
+  const deliverySeconds = Math.max(0, Math.floor((keyReceivedAt.getTime() - parkedAt.getTime()) / 1000));
+  if (deliverySeconds <= slaSeconds) {
+    return;
+  }
+
+  const driverId = ticket.parkingDriver || ticket.assignedDriver;
+  if (!driverId) {
+    return;
+  }
+
+  try {
+    let profile = await EmployeeProfile.findOne({ user: driverId });
+    if (!profile) {
+      const { generateEmployeeId } = await import("../utils/idGenerator.js");
+      profile = await EmployeeProfile.create({
+        user: driverId,
+        employeeId: await generateEmployeeId(),
+      });
+    }
+
+    const delayMinutes = Math.ceil((deliverySeconds - slaSeconds) / 60);
+    await EmployeeProfile.updateOne(
+      { _id: profile._id },
+      {
+        $inc: { timesDelayed: 1 },
+        $push: {
+          violations: `Key handover delayed by ${delayMinutes}m on ticket ${ticket.ticketNumber} (SLA ${Math.ceil(slaSeconds / 60)}m)`,
+        },
+      },
+    );
+  } catch (error) {
+    console.error("[KeyHandover] Failed to record violation:", error?.message || error);
+  }
+}
+
 const PARKING_ASSIGNABLE_STATUSES = [
   TICKET_STATUS.READY_TO_BE_PARKED,
 ];
@@ -874,6 +924,92 @@ function resolveDriverForStatus(ticket, status) {
   }
 
   return ticket.assignedDriver;
+}
+
+const RETRIEVAL_PROGRESS_STATUSES = [
+  TICKET_STATUS.REQUESTED_FOR_DELIVERY,
+  TICKET_STATUS.ASSIGNED_FOR_DELIVERY,
+  TICKET_STATUS.ON_THE_WAY,
+  TICKET_STATUS.ARRIVED_FOR_DELIVERY,
+  TICKET_STATUS.DELIVERED,
+];
+
+const TICKET_STATUS_LABELS = {
+  [TICKET_STATUS.READY_TO_BE_PARKED]: "Ready to park",
+  [TICKET_STATUS.PARKED_IN]: "Parked",
+  [TICKET_STATUS.REQUESTED_FOR_DELIVERY]: "Requested",
+  [TICKET_STATUS.ASSIGNED_FOR_DELIVERY]: "Assigned",
+  [TICKET_STATUS.ON_THE_WAY]: "On the way",
+  [TICKET_STATUS.ARRIVED_FOR_DELIVERY]: "Arrived",
+  [TICKET_STATUS.DELIVERED]: "Delivered",
+};
+
+function getRetrievalProgressStep(status) {
+  const index = RETRIEVAL_PROGRESS_STATUSES.indexOf(status);
+  return index === -1 ? 0 : index + 1;
+}
+
+function buildDriverPhotoUrl(req, imagePath) {
+  if (!imagePath) {
+    return null;
+  }
+  if (imagePath.startsWith("http://") || imagePath.startsWith("https://")) {
+    return imagePath;
+  }
+  const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+  return `${base.replace(/\/$/, "")}/${String(imagePath).replace(/^\//, "")}`;
+}
+
+function buildManagerTransactionCard(ticket, req) {
+  const keyControl = buildKeyControlMeta(ticket);
+  const driver = resolveDriverForStatus(ticket, ticket.status);
+
+  return {
+    id: String(ticket._id),
+    ticketNumber: ticket.ticketNumber,
+    valetCode: ticket.valetCode,
+    entryMethod: ticket.entryMethod || "",
+    status: ticket.status,
+    statusLabel: keyControl.isDelayed ? "Delayed" : (TICKET_STATUS_LABELS[ticket.status] || ticket.status),
+    isDelayed: keyControl.isDelayed,
+    delaySeconds: keyControl.delaySeconds,
+    progressStep: getRetrievalProgressStep(ticket.status),
+    totalSteps: RETRIEVAL_PROGRESS_STATUSES.length,
+    vehicle: ticket.vehicle
+      ? {
+        id: String(ticket.vehicle._id || ticket.vehicle),
+        plate: ticket.vehicle.plate || "",
+        make: ticket.vehicle.make || "",
+        model: ticket.vehicle.model || "",
+        color: ticket.vehicle.color || "",
+        photo: ticket.vehicle.photo || "",
+      }
+      : null,
+    garage: ticket.garage || "",
+    slot: ticket.slot || "",
+    keyTag: ticket.keyTag || "",
+    receivingPoint: ticket.receivingPoint || "",
+    payment: {
+      amount: ticket.payment?.amount ?? 0,
+      currency: ticket.payment?.currency || "QAR",
+      status: ticket.payment?.status || "",
+      method: ticket.payment?.method || "",
+    },
+    driver: driver
+      ? {
+        id: String(driver._id || driver),
+        fullName: driver.fullName || "",
+        phone: driver.phone || "",
+        role: driver.role || "",
+        photoUrl: buildDriverPhotoUrl(req, driver.profileImage),
+      }
+      : null,
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+    parkedAt: ticket.parkedAt || null,
+    requestedAt: ticket.retrieval?.requestedAt || null,
+    deliveredAt: ticket.retrieval?.deliveredAt || null,
+  };
 }
 
 function buildWhatsAppPrefillLink(identifier) {
@@ -1260,6 +1396,38 @@ async function markRetrievalRequestedOnTicket({
   return ticket;
 }
 
+function notifyTicketUser({
+  userId,
+  ticket,
+  title,
+  body,
+  eventType,
+  extraData = {},
+}) {
+  if (!userId || !ticket?._id || !title || !body) {
+    return;
+  }
+
+  void sendPushToUser({
+    userId: String(userId),
+    title,
+    body,
+    type: NOTIFICATION_TYPES.TICKET,
+    ticketId: ticket._id,
+    data: {
+      eventType,
+      ticketId: String(ticket._id),
+      ticketNumber: ticket.ticketNumber || "",
+      valetCode: ticket.valetCode || "",
+      status: ticket.status || "",
+      branchId: ticket.branch ? String(ticket.branch) : "",
+      ...extraData,
+    },
+  }).catch((error) => {
+    console.error("[Notifications] Failed to send ticket push:", error?.message || error);
+  });
+}
+
 async function emitTicketAssignedToDriver({
   req,
   ticket,
@@ -1268,7 +1436,7 @@ async function emitTicketAssignedToDriver({
 }) {
   try {
     const io = req.app?.get("io");
-    if (!io || !driverId) {
+    if (!driverId) {
       return;
     }
 
@@ -1287,16 +1455,31 @@ async function emitTicketAssignedToDriver({
       }
     }
 
-    io.to(`user_${String(driverId)}`).emit("ticket_assigned", {
-      ticketId: String(ticket._id),
-      ticketNumber: ticket.ticketNumber,
-      valetCode: ticket.valetCode,
-      status: ticket.status,
-      ownerType: ticket.ownerType,
-      assignedDriverId: String(driverId),
-      branchId: ticket.branch ? String(ticket.branch) : "",
-      assignedAt: new Date().toISOString(),
-      vehicle: resolvedVehicle,
+    if (io) {
+      io.to(`user_${String(driverId)}`).emit("ticket_assigned", {
+        ticketId: String(ticket._id),
+        ticketNumber: ticket.ticketNumber,
+        valetCode: ticket.valetCode,
+        status: ticket.status,
+        ownerType: ticket.ownerType,
+        assignedDriverId: String(driverId),
+        branchId: ticket.branch ? String(ticket.branch) : "",
+        assignedAt: new Date().toISOString(),
+        vehicle: resolvedVehicle,
+      });
+    }
+
+    notifyTicketUser({
+      userId: driverId,
+      ticket,
+      title: `Ticket ${ticket.ticketNumber}`,
+      body: ticket.status === TICKET_STATUS.ASSIGNED_FOR_DELIVERY
+        ? "You have been assigned to deliver this vehicle."
+        : "You have been assigned to park this vehicle.",
+      eventType: "TICKET_ASSIGNED",
+      extraData: {
+        assignmentType: ticket.status === TICKET_STATUS.ASSIGNED_FOR_DELIVERY ? "DELIVERY" : "PARKING",
+      },
     });
   } catch (error) {
     console.error("[Socket.IO] Failed to emit ticket_assigned:", error?.message || error);
@@ -1309,7 +1492,7 @@ async function emitRetrievalRequestedToOps({
 }) {
   try {
     const io = req.app?.get("io");
-    if (!io || !ticket?.branch) {
+    if (!ticket?.branch) {
       return;
     }
 
@@ -1356,14 +1539,26 @@ async function emitRetrievalRequestedToOps({
     };
 
     recipients.forEach((user) => {
-      io.to(`user_${String(user._id)}`).emit("retrieval_requested", payload);
+      if (io) {
+        io.to(`user_${String(user._id)}`).emit("retrieval_requested", payload);
+      }
+      notifyTicketUser({
+        userId: user._id,
+        ticket,
+        title: `Retrieval requested - ${ticket.ticketNumber}`,
+        body: `Vehicle retrieval requested${ticket.receivingPoint ? ` for ${ticket.receivingPoint}` : ""}.`,
+        eventType: "RETRIEVAL_REQUESTED",
+        extraData: {
+          receivingPoint: ticket.receivingPoint || "",
+        },
+      });
     });
   } catch (error) {
     console.error("[Socket.IO] Failed to emit retrieval_requested:", error?.message || error);
   }
 }
 
-// ─── Real-time: Notify car OWNER when ticket status changes ───────────────────
+// Real-time: notify car owner when ticket status changes
 // Covers owner-visible active ticket status updates.
 
 const STATUS_MESSAGES = {
@@ -1378,7 +1573,6 @@ const STATUS_MESSAGES = {
 async function emitTicketStatusToOwner({ req, ticket }) {
   try {
     const io = req.app?.get("io");
-    if (!io) return;
 
     // Resolve the owner's userId from the ticket
     let ownerUserId = ticket.ownerUser ? String(ticket.ownerUser) : null;
@@ -1391,7 +1585,7 @@ async function emitTicketStatusToOwner({ req, ticket }) {
       if (ownerUser) ownerUserId = String(ownerUser._id);
     }
 
-    if (!ownerUserId) return; // anonymous owner — cannot push
+    if (!ownerUserId) return; // anonymous owner cannot receive user push
 
     const message = STATUS_MESSAGES[ticket.status] || `Ticket status updated to ${ticket.status}`;
     const paymentRequirement = buildPaymentRequirement(
@@ -1403,17 +1597,30 @@ async function emitTicketStatusToOwner({ req, ticket }) {
           : "GENERAL",
     );
 
-    io.to(`user_${ownerUserId}`).emit("ticket_status_update", {
-      ticketId:       String(ticket._id),
-      ticketNumber:   ticket.ticketNumber,
-      status:         ticket.status,
-      message,
-      receivingPoint: ticket.receivingPoint || null,
-      paymentRequirement,
-      updatedAt:      new Date().toISOString(),
+    if (io) {
+      io.to(`user_${ownerUserId}`).emit("ticket_status_update", {
+        ticketId:       String(ticket._id),
+        ticketNumber:   ticket.ticketNumber,
+        status:         ticket.status,
+        message,
+        receivingPoint: ticket.receivingPoint || null,
+        paymentRequirement,
+        updatedAt:      new Date().toISOString(),
+      });
+    }
+
+    notifyTicketUser({
+      userId: ownerUserId,
+      ticket,
+      title: `Ticket ${ticket.ticketNumber}`,
+      body: message,
+      eventType: "TICKET_STATUS_UPDATED",
+      extraData: {
+        receivingPoint: ticket.receivingPoint || "",
+      },
     });
 
-    console.log(`[Socket.IO] Emitted ticket_status_update (${ticket.status}) → owner ${ownerUserId}`);
+    console.log(`[Socket.IO] Emitted ticket_status_update (${ticket.status}) to owner ${ownerUserId}`);
   } catch (error) {
     console.error("[Socket.IO] Failed to emit ticket_status_update:", error?.message || error);
   }
@@ -1942,7 +2149,7 @@ export async function updateTicketStatus(req, res) {
     note: "Status updated",
   });
 
-  // ── Notify car owner in real-time for key status changes ──────────────────
+  // Notify car owner in real-time for owner-visible status changes
   const ownerNotifyStatuses = [
     TICKET_STATUS.PARKED_IN,
     TICKET_STATUS.ON_THE_WAY,
@@ -3312,6 +3519,87 @@ export async function getKeyControllerQueue(req, res) {
   });
 }
 
+export async function getManagerActiveTransactions(req, res) {
+  if (!req.user?.branchId || !isValidObjectId(req.user.branchId)) {
+    throw forbidden("User is not assigned to a valid branch");
+  }
+
+  const parsed = managerTransactionsQuerySchema.safeParse(req.query || {});
+  if (!parsed.success) {
+    throw badRequest("Invalid query parameters", parsed.error.flatten());
+  }
+
+  const { scope, q, limit } = parsed.data;
+  const branchId = req.user.branchId;
+  const { start: todayStart, end: todayEnd } = (() => {
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    const end = new Date();
+    end.setUTCHours(23, 59, 59, 999);
+    return { start, end };
+  })();
+
+  const slaSeconds = Number.isFinite(KEY_HANDOVER_SLA_SECONDS) && KEY_HANDOVER_SLA_SECONDS > 0
+    ? KEY_HANDOVER_SLA_SECONDS
+    : 90;
+
+  const [active, requested, onTheWay, delivered, delayed] = await Promise.all([
+    Ticket.countDocuments({ branch: branchId, status: { $ne: TICKET_STATUS.DELIVERED } }),
+    Ticket.countDocuments({ branch: branchId, status: TICKET_STATUS.REQUESTED_FOR_DELIVERY }),
+    Ticket.countDocuments({ branch: branchId, status: TICKET_STATUS.ON_THE_WAY }),
+    Ticket.countDocuments({
+      branch: branchId,
+      status: TICKET_STATUS.DELIVERED,
+      updatedAt: { $gte: todayStart, $lte: todayEnd },
+    }),
+    Ticket.countDocuments({
+      branch: branchId,
+      status: TICKET_STATUS.PARKED_IN,
+      keyReceivedAt: null,
+      parkedAt: { $lte: new Date(Date.now() - slaSeconds * 1000) },
+    }),
+  ]);
+
+  const filter = scope === "delivered"
+    ? { branch: branchId, status: TICKET_STATUS.DELIVERED }
+    : { branch: branchId, status: { $ne: TICKET_STATUS.DELIVERED } };
+
+  const fetchLimit = q ? Math.max(limit, 300) : limit;
+  const tickets = await Ticket.find(filter)
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .limit(fetchLimit)
+    .populate("vehicle", "plate make model color photo")
+    .populate("assignedDriver", "fullName phone role profileImage")
+    .populate("parkingDriver", "fullName phone role profileImage")
+    .populate("deliveryDriver", "fullName phone role profileImage")
+    .lean();
+
+  const queryText = (q || "").toLowerCase().trim();
+  const filtered = queryText
+    ? tickets.filter((ticket) => matchesTicketSearch(ticket, queryText))
+    : tickets;
+  const trimmed = filtered.slice(0, limit);
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        scope,
+        counts: {
+          active,
+          requested,
+          onTheWay,
+          delayed,
+          delivered,
+        },
+        count: trimmed.length,
+        tickets: trimmed.map((ticket) => buildManagerTransactionCard(ticket, req)),
+      },
+      "Transactions fetched successfully",
+    ),
+  );
+}
+
 export async function markKeyReceived(req, res) {
   const { ticketId } = req.params;
   if (!isValidObjectId(ticketId)) {
@@ -3340,6 +3628,7 @@ export async function markKeyReceived(req, res) {
     throw conflict("Key is already marked as received");
   }
 
+  const parkedAt = resolveParkedAt(ticket);
   ticket.keyReceivedAt = new Date();
   ticket.keyReceivedBy = req.user.id;
   if (parsed.data.notes !== undefined) {
@@ -3356,6 +3645,12 @@ export async function markKeyReceived(req, res) {
       keyReceivedAt: ticket.keyReceivedAt,
       keyReceivedBy: req.user.id,
     },
+  });
+
+  await recordKeyHandoverViolationIfLate({
+    ticket,
+    parkedAt,
+    keyReceivedAt: ticket.keyReceivedAt,
   });
 
   return res.status(200).json(
@@ -3446,6 +3741,17 @@ export async function releaseKey(req, res) {
         releasedBy: String(req.user.id),
       });
     }
+    notifyTicketUser({
+      userId: ticket.deliveryDriver,
+      ticket,
+      title: `Key released - ${ticket.ticketNumber}`,
+      body: "The key has been released to you for vehicle delivery.",
+      eventType: "KEY_RELEASED",
+      extraData: {
+        keyReleasedAt: ticket.keyReleasedAt ? ticket.keyReleasedAt.toISOString() : "",
+        releasedBy: String(req.user.id),
+      },
+    });
   } catch (error) {
     console.error("[Socket.IO] Failed to emit key_released:", error?.message || error);
   }
@@ -3805,7 +4111,7 @@ export async function createManualCarArrival(req, res) {
   );
 }
 
-// ─── PATCH /api/v1/tickets/:ticketId/park ─────────────────────────────────────
+// PATCH /api/v1/tickets/:ticketId/park
 // Driver submits parking details (slot, keyTag, keyNote, photo) after parking
 // Transitions ticket status: READY_TO_BE_PARKED -> PARKED_IN
 

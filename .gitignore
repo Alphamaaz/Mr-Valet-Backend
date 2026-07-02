@@ -21,6 +21,8 @@ pnpm-debug.log*
 .env
 .env.*
 *.env
+*firebase-adminsdk*.json
+firebase-service-account*.json
 
 # =========================
 # Dependency Directories

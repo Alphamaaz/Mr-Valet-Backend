@@ -6,6 +6,7 @@ import {
   createManualCarArrival,
   getDamageClaims,
   getKeyControllerQueue,
+  getManagerActiveTransactions,
   getMyAssignedTickets,
   getOwnerActiveTickets,
   getPublicRetrievalSummary,
@@ -75,6 +76,12 @@ router.get(
   "/retrieval-requests",
   requireRoles(ROLES.RECEPTIONIST, ROLES.KEY_CONTROLLER, ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
   asyncHandler(listRetrievalRequests),
+);
+
+router.get(
+  "/manager/transactions",
+  requireRoles(ROLES.SUPERVISOR, ROLES.OPERATIONS_MANAGER),
+  asyncHandler(getManagerActiveTransactions),
 );
 
 router.post(

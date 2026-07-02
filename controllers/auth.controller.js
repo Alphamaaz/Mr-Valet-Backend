@@ -3,6 +3,7 @@ import { z } from "zod";
 import { badRequest, unauthorized } from "../errors/AppError.js";
 import { User } from "../models/User.js";
 import { LoginOtp } from "../models/LoginOtp.js";
+import { DeviceToken, DEVICE_PLATFORM } from "../models/DeviceToken.js";
 import { signAccessToken, verifyAccessToken } from "../utils/token.js";
 import { sendOtpSms } from "../services/vodafone.service.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
@@ -15,7 +16,33 @@ const requestOtpSchema = z.object({
 const verifyOtpSchema = z.object({
   phone: z.string().trim().min(8).max(20),
   otp: z.string().trim().regex(/^\d{4,10}$/),
+  fcmToken: z.string().trim().min(20).max(4096).optional(),
+  platform: z.enum(Object.values(DEVICE_PLATFORM)).default(DEVICE_PLATFORM.UNKNOWN),
+  deviceId: z.string().trim().max(160).optional(),
+  appVersion: z.string().trim().max(60).optional(),
 });
+
+async function upsertDeviceToken({ userId, token, platform, deviceId = "", appVersion = "" }) {
+  await DeviceToken.updateMany(
+    { token, user: { $ne: userId } },
+    { $set: { isActive: false } },
+  );
+
+  await DeviceToken.findOneAndUpdate(
+    { token },
+    {
+      $set: {
+        user: userId,
+        platform,
+        deviceId,
+        appVersion,
+        isActive: true,
+        lastSeenAt: new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
 
 const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 5);
 const MAX_OTP_ATTEMPTS = Number(process.env.MAX_OTP_ATTEMPTS || 5);
@@ -126,7 +153,7 @@ export async function verifyOtp(req, res) {
     throw badRequest("Invalid request payload", parsed.error.flatten());
   }
 
-  const { otp } = parsed.data;
+  const { otp, fcmToken, platform, deviceId, appVersion } = parsed.data;
   const phone = sanitizePhone(parsed.data.phone);
   const user = await User.findOne({ phone, isActive: true });
   if (!user) {
@@ -159,6 +186,16 @@ export async function verifyOtp(req, res) {
 
   user.lastLoginAt = new Date();
   await user.save();
+
+  if (fcmToken) {
+    await upsertDeviceToken({
+      userId: user._id,
+      token: fcmToken,
+      platform,
+      deviceId,
+      appVersion,
+    });
+  }
 
   const accessToken = signAccessToken({
     sub: String(user._id),

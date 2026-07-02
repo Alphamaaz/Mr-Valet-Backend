@@ -9,6 +9,7 @@ import { User } from "../models/User.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { publishEvent } from "../utils/redis.js";
 import { STAFF_ROLES } from "../constants/roles.js";
+import { sendPushToUser, NOTIFICATION_TYPES } from "../services/notification.service.js";
 
 // ─── Validation Schemas ───────────────────────────────────────────────
 
@@ -255,16 +256,29 @@ export async function sendGroupMessage(req, res) {
 
   // Emit via Socket.IO to all group members except sender
   const io = req.app.get("io");
-  if (io) {
-    for (const memberId of group.members) {
-      const mId = String(memberId);
-      if (mId !== senderId) {
+  const senderName = populatedMessage?.sender?.fullName || "Someone";
+  for (const memberId of group.members) {
+    const mId = String(memberId);
+    if (mId !== senderId) {
+      if (io) {
         io.to(`user_${mId}`).emit("new_group_message", {
           groupId: String(group._id),
           groupName: group.name,
           message: populatedMessage,
         });
       }
+      void sendPushToUser({
+        userId: mId,
+        title: `${group.name}`,
+        body: `${senderName}: ${text}`,
+        type: NOTIFICATION_TYPES.CHAT,
+        data: {
+          groupId: String(group._id),
+          messageId: String(message._id),
+          senderId,
+        },
+        persist: false,
+      }).catch(() => {});
     }
   }
 
@@ -601,16 +615,29 @@ export async function sendVoiceMessage(req, res) {
 
   // Emit via Socket.IO to all group members except sender
   const io = req.app.get("io");
-  if (io) {
-    for (const memberId of group.members) {
-      const mId = String(memberId);
-      if (mId !== senderId) {
+  const senderName = populatedMessage?.sender?.fullName || "Someone";
+  for (const memberId of group.members) {
+    const mId = String(memberId);
+    if (mId !== senderId) {
+      if (io) {
         io.to(`user_${mId}`).emit("new_group_message", {
           groupId: String(group._id),
           groupName: group.name,
           message: populatedMessage,
         });
       }
+      void sendPushToUser({
+        userId: mId,
+        title: `${group.name}`,
+        body: `${senderName}: 🎤 Voice message`,
+        type: NOTIFICATION_TYPES.CHAT,
+        data: {
+          groupId: String(group._id),
+          messageId: String(message._id),
+          senderId,
+        },
+        persist: false,
+      }).catch(() => {});
     }
   }
 

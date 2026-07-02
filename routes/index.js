@@ -15,6 +15,7 @@ import paymentRoutes from "./payment.routes.js";
 import paperTicketRoutes from "./paperTicket.routes.js";
 import nfcTagRoutes from "./nfcTag.routes.js";
 import incidentReportRoutes from "./incidentReport.routes.js";
+import notificationRoutes from "./notification.routes.js";
 
 const router = Router();
 
@@ -34,5 +35,6 @@ router.use("/v1/payments", paymentRoutes);
 router.use("/v1/paper-tickets", paperTicketRoutes);
 router.use("/v1/nfc-tags", nfcTagRoutes);
 router.use("/v1/incident-reports", incidentReportRoutes);
+router.use("/v1/notifications", notificationRoutes);
 
 export default router;
